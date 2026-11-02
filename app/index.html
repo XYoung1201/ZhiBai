@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<title>知白</title>
+<meta name="description" content="一处安静的书房：把书放上书架，打开就读。">
+<meta name="theme-color" content="#F3F1EB">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="知白">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<script>
+  // 首帧即用对的纸色，避免闪白
+  try {
+    const s = JSON.parse(localStorage.getItem('zb-theme-hint') || 'null');
+    const h = new Date().getHours();
+    const t = s && s !== 'auto' && s !== 'system' ? s : s === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'ink' : 'paper') : (h >= 6 && h < 17 ? 'paper' : h >= 17 && h < 20 ? 'rice' : 'ink');
+    document.documentElement.dataset.theme = t;
+  } catch {}
+</script>
+<link rel="stylesheet" href="vendor/temml/Temml-Local.css">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="fonts/wenkai/wenkai.css" media="print" onload="this.media='all'">
+<link rel="stylesheet" href="fonts/serif/serif.css" media="print" onload="this.media='all'">
+<link rel="modulepreload" href="js/util.js">
+<link rel="modulepreload" href="js/store.js">
+<link rel="modulepreload" href="js/library.js">
+<link rel="modulepreload" href="js/reader.js">
+</head>
+<body>
+<div id="library" class="library"></div>
+<div id="reader" class="reader" hidden></div>
+<noscript><p style="padding:2rem">知白需要启用 JavaScript。</p></noscript>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
