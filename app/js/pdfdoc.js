@@ -1,5 +1,6 @@
 // PDF：pdf.js 分段加载（Range），按需渲染，智能裁白边，文字层可选中，书内搜索；翻页与滚动两种视图
 import { h, clamp } from './util.js';
+import { pageAnnots, importPage, drawNotes } from './annot.js';
 
 let pdfjsP;
 const abs = p => new URL(p, location.href).href;
@@ -31,7 +32,7 @@ export class PdfDoc {
   }
   constructor(pdf, pdfjs) {
     this.pdf = pdf; this.pdfjs = pdfjs; this.n = pdf.numPages;
-    this.pages = new Map(); this.sizes = new Map(); this.cache = new Map(); this.thumbs = new Map(); this.texts = new Map();
+    this.pages = new Map(); this.sizes = new Map(); this.vps = new Map(); this.anns = new Map(); this.notes = []; this.cache = new Map(); this.thumbs = new Map(); this.texts = new Map();
     this.crop = null; this.renderQ = Promise.resolve();
   }
   async #init() {
@@ -42,8 +43,36 @@ export class PdfDoc {
     this.meta = { title: meta?.info?.Title || '', author: meta?.info?.Author || '' };
   }
   async page(i) {
-    if (!this.pages.has(i)) this.pages.set(i, this.pdf.getPage(i + 1).then(p => { const v = p.getViewport({ scale: 1 }); this.sizes.set(i, { w: v.width, h: v.height }); return p; }));
+    if (!this.pages.has(i)) this.pages.set(i, this.pdf.getPage(i + 1).then(p => { const v = p.getViewport({ scale: 1 }); this.sizes.set(i, { w: v.width, h: v.height }); this.vps.set(i, v); return p; }));
     return this.pages.get(i);
+  }
+  vp1(i) { return this.vps.get(i); }
+  // 文件自带的批注（高亮、便签、手绘……）
+  annotsOf(i) { if (!this.anns.has(i)) this.anns.set(i, pageAnnots(this, i)); return this.anns.get(i); }
+  async scanAnnots(onPage, signal) {
+    for (let i = 0; i < this.n; i++) {
+      if (signal?.aborted) return;
+      const list = await this.annotsOf(i);
+      if (list.length) onPage(await importPage(this, i, list));
+      if (i % 12 === 11) await new Promise(r => setTimeout(r, 30));
+    }
+  }
+  setNotes(notes, root) {
+    this.notes = notes || [];
+    if (root) for (const w of root.querySelectorAll('.pdf-page[data-page]')) this.#drawNotes(w, +w.dataset.page);
+  }
+  // 与文字层同一几何：覆盖整页（含被裁去的白边），子元素按百分比定位
+  #fullBox(el, i, css) {
+    const crop = this.cropOf(i) || [0, 0, 1, 1], size = this.sizeOf(i);
+    Object.assign(el.style, { inset: 'auto', left: -crop[0] * size.w * css + 'px', top: -crop[1] * size.h * css + 'px', width: size.w * css + 'px', height: size.h * css + 'px' });
+  }
+  #drawNotes(wrap, i) {
+    let box = wrap.querySelector('.pdf-ann');
+    const mine = this.notes.some(n => n.page === i && n.kind === 'pdf' && !n.del);
+    if (!mine) { box?.replaceChildren(); return; }
+    if (!box) { box = h('div', { class: 'pdf-ann' }); const tl = wrap.querySelector('.textLayer'); tl ? tl.before(box) : wrap.append(box); }
+    this.#fullBox(box, i, +wrap.querySelector('canvas').dataset.css);
+    drawNotes(box, i, this.notes, this.vp1(i));
   }
   sizeOf(i) { return this.sizes.get(i) || this.base; }
   cropOf(i) { return this.crop ? (i % 2 ? this.crop.odd : this.crop.even) : null; }
@@ -165,10 +194,11 @@ export class PdfDoc {
     const fw = parseFloat(face.style.width), fh = parseFloat(face.style.height);
     const canvas = await this.#render(i, fw, fh, zoom);
     const old = face.querySelector('.pdf-page');
-    const wrap = h('div', { class: 'pdf-page' });
+    const wrap = h('div', { class: 'pdf-page', dataset: { page: i } });
     wrap.style.width = canvas.style.width; wrap.style.height = canvas.style.height;
     wrap.append(canvas);
     if (keepText && old?.querySelector('.textLayer')) wrap.append(old.querySelector('.textLayer'));
+    this.#drawNotes(wrap, i);
     face.replaceChildren(wrap);
   }
   #dropCache() { for (const c of this.cache.values()) c.canvas.width = 0; this.cache.clear(); }
@@ -178,6 +208,8 @@ export class PdfDoc {
     if (hit) { this.cache.delete(key); this.cache.set(key, hit); return hit.canvas.isConnected ? copyCanvas(hit.canvas) : hit.canvas; }
     const job = this.renderQ.then(async () => {
       const page = await this.page(i);
+      // 页上若有批注，由阅读器自己画（才能改色、删除）；否则照文件原样
+      const annMode = (await this.annotsOf(i)).length ? this.pdfjs.AnnotationMode.DISABLE : this.pdfjs.AnnotationMode.ENABLE;
       const size = this.sizeOf(i), crop = this.cropOf(i) || [0, 0, 1, 1];
       const cw = size.w * (crop[2] - crop[0]), ch = size.h * (crop[3] - crop[1]);
       const css = Math.min(fw / cw, fh / ch);
@@ -189,7 +221,7 @@ export class PdfDoc {
       c.style.width = (cw * css).toFixed(2) + 'px'; c.style.height = (ch * css).toFixed(2) + 'px';
       c.dataset.css = css; c.dataset.page = i;
       const ctx = c.getContext('2d', { alpha: false });
-      await page.render({ canvasContext: ctx, viewport: vp, transform: [1, 0, 0, 1, -crop[0] * vp.width, -crop[1] * vp.height], background: '#ffffff' }).promise;
+      await page.render({ canvasContext: ctx, viewport: vp, transform: [1, 0, 0, 1, -crop[0] * vp.width, -crop[1] * vp.height], background: '#ffffff', annotationMode: annMode }).promise;
       return c;
     });
     this.renderQ = job.catch(() => {});
@@ -207,9 +239,10 @@ export class PdfDoc {
     const vp = page.getViewport({ scale: css });
     const tl = h('div', { class: 'textLayer' });
     tl.style.setProperty('--total-scale-factor', css); tl.style.setProperty('--scale-factor', css);
-    Object.assign(tl.style, { left: -crop[0] * size.w * css + 'px', top: -crop[1] * size.h * css + 'px', width: size.w * css + 'px', height: size.h * css + 'px', inset: 'auto' });
+    this.#fullBox(tl, i, css);
     wrap.append(tl);
     try { await new this.pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: tl, viewport: vp }).render(); } catch (e) { console.warn(e); }
+    this.#fullBox(tl, i, css); // pdf.js 会改写容器尺寸，按我们的几何复位
     if (this.hit?.page === i) markHit(tl, this.hit.q);
   }
   async thumb(i, w = 132) {
@@ -278,8 +311,8 @@ function markHit(tl, q) {
 
 // ---------- 滚动视图 ----------
 export class PdfScroll {
-  constructor(doc, stage, { onChange, onTap } = {}) {
-    this.doc = doc; this.cb = { onChange, onTap };
+  constructor(doc, stage, { onChange, onTap, onZoom } = {}) {
+    this.doc = doc; this.cb = { onChange, onTap, onZoom };
     this.el = h('div', { class: 'scroller pdf-scroller' });
     this.inner = h('div', { class: 'scroll-inner' });
     this.el.append(this.inner); stage.append(this.el);
@@ -295,8 +328,32 @@ export class PdfScroll {
     });
     this.el.addEventListener('wheel', e => {
       if (!e.ctrlKey) return; e.preventDefault();
-      this.setZoom(this.zoom * Math.exp(-e.deltaY * .01));
+      const r = this.el.getBoundingClientRect();
+      this.setZoom(this.zoom * Math.exp(-e.deltaY * .01), e.clientX - r.left, e.clientY - r.top);
     }, { passive: false });
+    // 双指缩放：手势中只做 CSS 预览，松手后按新宽度重绘，字迹清晰
+    let pinch = null;
+    const mid = t => { const r = this.el.getBoundingClientRect(); return { x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top, d: Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY) }; };
+    this.el.addEventListener('touchstart', e => {
+      if (e.touches.length !== 2) return;
+      const m = mid(e.touches);
+      pinch = { ...m, k: 1, ox: this.el.scrollLeft + m.x, oy: this.el.scrollTop + m.y };
+      this.inner.style.transformOrigin = `${pinch.ox}px ${pinch.oy}px`;
+    }, { passive: true });
+    this.el.addEventListener('touchmove', e => {
+      if (!pinch || e.touches.length !== 2) return;
+      e.preventDefault();
+      pinch.k = clamp(mid(e.touches).d / pinch.d, .5 / this.zoom, 4 / this.zoom);
+      this.inner.style.transform = `scale(${pinch.k})`;
+    }, { passive: false });
+    const endPinch = () => {
+      if (!pinch) return;
+      const { k, x, y } = pinch; pinch = null;
+      this.inner.style.transform = ''; this.inner.style.transformOrigin = '';
+      if (Math.abs(k - 1) > .03) this.setZoom(this.zoom * k, x, y);
+    };
+    this.el.addEventListener('touchend', e => { if (e.touches.length < 2) endPinch(); });
+    this.el.addEventListener('touchcancel', endPinch);
   }
   get spread() { return false; }
   layout() {
@@ -309,6 +366,7 @@ export class PdfScroll {
     this.inner.replaceChildren();
     const w = this.layout();
     this.pw = w;
+    this.cb.onZoom?.(this.zoom);
     const frag = document.createDocumentFragment();
     this.slots = [];
     for (let i = 0; i < this.doc.n; i++) {
@@ -339,7 +397,7 @@ export class PdfScroll {
     slot.append(wrap);
     const a = this.doc.aspectOf(i); const hh = Math.round(this.pw / a);
     if (Math.abs(parseFloat(slot.style.height) - hh) > 2) slot.style.height = hh + 'px';
-    if (i === this.current) this.doc.textLayer(slot);
+    this.doc.textLayer(slot);
   }
   #hide(slot) {
     if (!slot.dataset.shown) return;
@@ -357,12 +415,26 @@ export class PdfScroll {
     this.cb.onChange?.(lo, frac);
   }
   position() { if (!this.slots) return { page: 0, frac: 0 }; const s = this.slots[this.current || 0], r = this.el.getBoundingClientRect(); return { page: this.current || 0, frac: clamp((r.top - s.getBoundingClientRect().top) / s.offsetHeight, 0, 1) }; }
-  setZoom(z) {
-    z = clamp(z, .5, 4); if (Math.abs(z - this.zoom) < .01) return;
-    const { page, frac } = this.position();
+  // 以 (cx, cy) 为不动点缩放：先拉伸现有页面，稍后按新尺寸重绘
+  setZoom(z, cx = this.el.clientWidth / 2, cy = this.el.clientHeight * .35) {
+    z = clamp(z, .5, 4); if (!this.slots || Math.abs(z - this.zoom) < .005) return;
+    const sl = this.el.scrollLeft, st = this.el.scrollTop, k = z / this.zoom;
     this.zoom = z;
-    clearTimeout(this.zt); this.zt = setTimeout(() => { this.doc.layoutKey = null; this.open(page, frac); }, 120);
+    const w = this.layout(); this.pw = w;
+    for (const s of this.slots) { s.style.width = w + 'px'; s.style.height = Math.round(w / this.doc.aspectOf(+s.dataset.page)) + 'px'; }
+    this.inner.style.width = Math.max(w, this.el.clientWidth) + 'px';
+    this.el.scrollLeft = (sl + cx) * k - cx; this.el.scrollTop = (st + cy) * k - cy;
+    this.cb.onZoom?.(z);
+    clearTimeout(this.zt); this.zt = setTimeout(() => this.#rerender(), 180);
   }
+  #rerender() {
+    const r = this.el.getBoundingClientRect(), pad = r.height * 1.2;
+    for (const s of this.slots) {
+      const b = s.getBoundingClientRect(), near = b.bottom > r.top - pad && b.top < r.bottom + pad;
+      if (near) { delete s.dataset.shown; this.#show(s); } else this.#hide(s);
+    }
+  }
+  fitWidth() { this.setZoom(1); }
   turn(dir) { this.el.scrollBy({ top: dir * (this.el.clientHeight - 64), behavior: 'smooth' }); return Promise.resolve(true); }
   relayout() { const { page, frac } = this.position(); return this.open(page, frac); }
   destroy() { this.io.disconnect(); this.el.remove(); }

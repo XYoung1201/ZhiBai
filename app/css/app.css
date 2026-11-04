@@ -501,7 +501,7 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .pager.zoomed { cursor: grab; }
 
 /* pdf.js 文字层（取自 pdf_viewer.css 的必要部分） */
-.textLayer { position: absolute; text-align: initial; overflow: clip; opacity: 1; line-height: 1; -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; z-index: 2; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
+.textLayer { --scale-round-x: 1px; --scale-round-y: 1px; position: absolute; text-align: initial; overflow: clip; opacity: 1; line-height: 1; -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; z-index: 2; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
 .textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; -webkit-user-select: text; user-select: text; }
 .textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) { z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg; transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
 .textLayer .markedContent { display: contents; }
@@ -602,8 +602,16 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .mk-l { font-size: 14px; color: var(--ink); }
 .mk-t { font: 13px/1.6 var(--r-font, var(--font-serif)); color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .mk-m { font-size: 11.5px; color: var(--ink-3); }
-.note-list li { border-bottom: 1px solid var(--line); }
-.note-list li button { display: block; width: 100%; padding: 14px 6px; text-align: left; }
+.note-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; border-bottom: 1px solid var(--line); }
+.note-list .nl-go { display: block; width: 100%; padding: 14px 6px; text-align: left; }
+.note-list .nl-go:disabled { cursor: default; }
+.note-list .nl-edit { margin-top: 10px; color: var(--ink-3); opacity: .55; transition: opacity .2s, color .2s; }
+.note-list li:hover .nl-edit, .note-list .nl-edit:focus-visible { opacity: 1; color: var(--accent); }
+@media (hover: none) { .note-list .nl-edit { opacity: .8; } }
+.note-list li.from-pdf .mk-m::before { content: '\25C6  '; font-size: 8px; vertical-align: 1px; color: var(--accent); }
+.note-acts { display: flex; flex-wrap: wrap; gap: 4px 18px; padding: 6px 2px 4px; }
+.note-acts .link-btn { display: inline-flex; align-items: center; gap: 6px; }
+.note-acts .link-btn .ic { width: 16px; height: 16px; }
 .note-list blockquote { margin: 0 0 6px; padding-left: 12px; border-left: 3px solid var(--hl-y); font: 14px/1.7 var(--font-serif); color: var(--ink); }
 .note-list li.c-g blockquote { border-color: var(--hl-g); } .note-list li.c-b blockquote { border-color: var(--hl-b); } .note-list li.c-r blockquote { border-color: var(--hl-r); }
 .note-list p { margin: 0 0 6px; font-size: 13.5px; color: var(--ink-2); }
@@ -662,7 +670,8 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .pop .pb { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 8px; border-radius: 9px; font-size: 10.5px; letter-spacing: .08em; }
 .pop .pb .ic { width: 18px; height: 18px; }
 .pop .pb:hover { background: rgba(127, 127, 127, .18); }
-.pop-note { width: 100%; padding: 6px 8px 8px; font-size: 13px; line-height: 1.6; opacity: .9; border-bottom: 1px solid rgba(127, 127, 127, .25); margin-bottom: 2px; }
+.pop-note b { font-weight: 600; margin-right: 2px; }
+.pop-note { width: 100%; max-height: 30vh; overflow: auto; white-space: pre-wrap; padding: 6px 8px 8px; font-size: 13px; line-height: 1.6; opacity: .9; border-bottom: 1px solid rgba(127, 127, 127, .25); margin-bottom: 2px; }
 .note-pop { display: block; max-width: min(88vw, 400px); padding: 14px 16px 12px; }
 .np-text { max-height: 40vh; overflow: auto; font: 14px/1.75 var(--font-serif); }
 .np-jump { margin-top: 10px; font-size: 12.5px; color: var(--accent); }
@@ -710,3 +719,61 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .calm *, .calm *::before, .calm *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 @media (prefers-reduced-motion: reduce) { .welcome-mark, .drop-ring, .ink-drop i { animation: none; } }
 @media print { .library, .reader { display: none; } }
+
+/* PDF 页上的批注：与文字层同框，按百分比定位 */
+.pdf-ann { position: absolute; z-index: 2; pointer-events: none; }
+.pdf-ann > * { position: absolute; pointer-events: auto; cursor: pointer; --hlc: #F2C94C; }
+.pdf-ann .c-g { --hlc: #7CC4A4; } .pdf-ann .c-b { --hlc: #8DB2F2; } .pdf-ann .c-r { --hlc: #F29088; }
+.ann-q.hl { background: color-mix(in srgb, var(--ann, var(--hlc)) 62%, transparent); mix-blend-mode: multiply; border-radius: 1.5px; }
+.ann-q.u { border-bottom: 2px solid var(--ann, var(--hlc)); }
+.ann-q.s { background: linear-gradient(transparent 46%, var(--ann, var(--hlc)) 46%, var(--ann, var(--hlc)) 58%, transparent 58%); }
+.ann-q.w { border-bottom: 2px dotted var(--ann, var(--hlc)); }
+.ann-q.has-note::after { content: ''; position: absolute; right: -3px; top: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--seal, #B23A2E); box-shadow: 0 0 0 1.5px #fff; }
+.ann-pin { width: 18px; height: 18px; margin: -2px 0 0 -2px; border-radius: 4px 4px 4px 1px; background: var(--ann, var(--hlc)); box-shadow: 0 1px 3px rgba(0, 0, 0, .3), inset 0 -5px 0 rgba(0, 0, 0, .08); }
+.ann-pin::before { content: ''; position: absolute; left: 4px; right: 4px; top: 5px; height: 6px; border-top: 1.5px solid rgba(0, 0, 0, .35); border-bottom: 1.5px solid rgba(0, 0, 0, .35); }
+.ann-box.ft { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ann, var(--hlc)) 80%, transparent); border-radius: 2px; }
+.ann-box.dr:not(.ink) { box-shadow: inset 0 0 0 1.5px var(--ann, var(--hlc)); }
+.ann-box svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.ann-box polyline { fill: none; stroke: var(--ann, var(--hlc)); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+[data-theme="ink"] .reader.pdf-tint .ann-q.hl { mix-blend-mode: screen; background: color-mix(in srgb, var(--ann, var(--hlc)) 38%, transparent); }
+.textLayer ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* 笔记编辑器 */
+.ne-scrim { position: absolute; inset: 0; z-index: 60; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity .3s; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
+.reader.editing .ne-scrim { opacity: 1; pointer-events: auto; }
+.note-editor { position: absolute; z-index: 61; left: 50%; top: 50%; display: flex; flex-direction: column; gap: 14px; width: min(580px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow: auto; padding: 20px 22px 18px; border-radius: 22px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-3); opacity: 0; pointer-events: none; transform: translate(-50%, -46%) scale(.97); transition: transform .42s var(--ease-water), opacity .25s; overscroll-behavior: contain; }
+.note-editor.show { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%); }
+.ne-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ne-head b { display: block; font: 600 17px/1.4 var(--font-display); letter-spacing: .08em; }
+.ne-head span { display: block; margin-top: 2px; font-size: 12.5px; color: var(--ink-3); }
+.ne-quote { --qc: #E2BA50; position: relative; margin: 0; max-height: calc(1.85em * 3 + 20px); overflow: hidden; padding: 10px 14px 10px 16px; border-left: 3px solid var(--qc); border-radius: 3px 12px 12px 3px; background: color-mix(in srgb, var(--qc) 10%, var(--bg-2)); font: 15px/1.85 var(--font-serif); color: var(--ink-2); white-space: pre-wrap; cursor: pointer; transition: max-height .35s var(--ease), background-color .3s, border-color .3s; }
+.ne-quote.long:not(.open) { -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+.ne-quote.open { max-height: 38vh; overflow: auto; cursor: auto; }
+.ne-quote.c-g, .ne-chip.c-g { --qc: #5EA08C; } .ne-quote.c-b, .ne-chip.c-b { --qc: #5C80BE; } .ne-quote.c-r, .ne-chip.c-r { --qc: #C8605C; }
+.ne-colors { display: flex; flex-wrap: wrap; gap: 8px; }
+.ne-chip { --qc: #E2BA50; display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px 0 9px; border-radius: 999px; font-size: 13px; letter-spacing: .12em; color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-2); transition: background-color .25s, box-shadow .25s, color .25s; }
+.ne-chip i { width: 14px; height: 14px; border-radius: 50%; background: var(--qc); transition: transform .3s var(--ease); }
+.ne-chip:hover i { transform: scale(1.15); }
+.ne-chip.on { color: var(--ink); background: color-mix(in srgb, var(--qc) 14%, transparent); box-shadow: inset 0 0 0 1.5px var(--qc); }
+.ne-input { display: block; width: 100%; min-height: 132px; resize: none; padding: 14px 16px; border: 0; border-radius: 14px; outline: none; background: var(--bg-2); color: var(--ink); font: 16px/1.85 var(--font-serif); box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow .2s, background-color .2s; }
+.ne-input::placeholder { color: var(--ink-4); }
+.ne-input:focus { background: color-mix(in srgb, var(--bg-2) 55%, var(--surface)); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.ne-foot { display: flex; align-items: center; gap: 10px; }
+.ne-meta { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 12px; color: var(--ink-4); font-variant-numeric: tabular-nums; }
+.ne-foot .btn { height: 38px; padding: 0 18px; }
+.ne-foot .btn.danger { padding: 0 12px; box-shadow: none; }
+@media (hover: none) { .ne-hint { display: none; } }
+@media (max-width: 599px) {
+  .note-editor { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 92dvh; padding: 16px 18px calc(14px + var(--sab)); border-radius: 22px 22px 0 0; transform: translateY(104%); }
+  .note-editor.show { transform: none; }
+  .ne-input { min-height: 24dvh; }
+}
+
+/* 上下滑动时的缩放 */
+.zoom-pill { position: absolute; z-index: 43; right: calc(16px + var(--sar)); bottom: calc(26px + var(--sab)); display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 999px; background: var(--pop-bg); color: var(--pop-ink); box-shadow: var(--shadow-2); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .25s, transform .35s var(--ease), bottom .35s var(--ease); }
+.zoom-pill .ib { color: inherit; }
+.zoom-pill .zv { min-width: 58px; height: 32px; border-radius: 999px; font: 500 13px var(--font-ui); font-variant-numeric: tabular-nums; color: inherit; }
+.zoom-pill .zv:hover, .zoom-pill .ib:hover { background: rgba(127, 127, 127, .2); }
+.reader[data-kind="pdf"].scrolling.chrome .zoom-pill, .reader[data-kind="pdf"].scrolling.zooming .zoom-pill { opacity: 1; transform: none; pointer-events: auto; }
+.reader.scrolling.chrome .zoom-pill { bottom: calc(132px + var(--sab)); }
+.pdf-scroller { touch-action: pan-x pan-y; }

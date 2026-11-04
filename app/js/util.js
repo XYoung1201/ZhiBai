@@ -164,6 +164,7 @@ const P = {
   back: '<path d="M15 5l-7 7 7 7"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   toc: '<path d="M4 6h16M4 12h16M4 18h10"/>',
   bookmark: '<path d="M7 3.5h10v17l-5-3.6-5 3.6z"/>',
