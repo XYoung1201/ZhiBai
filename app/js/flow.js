@@ -54,7 +54,7 @@ export class FlowDoc {
   // ---------- 章节 ----------
   async load(s) {
     if (!this.html.has(s)) this.html.set(s, Promise.resolve(this.book.sections[s].load()).then(html => {
-      if (!this.sizes[s]) this.sizes[s] = html.length;
+      if (!this.sizes[s]) this.sizes[s] = textLen(html || '');
       return html || '';
     }).catch(e => { console.warn(e); return `<p class="load-error">这一章没能读出来。</p>`; }));
     return this.html.get(s);
@@ -89,7 +89,7 @@ export class FlowDoc {
     el.querySelectorAll('mark.hl, mark.hit').forEach(m => m.replaceWith(...m.childNodes));
     el.normalize();
     this.#index(t);
-    for (const n of this.notes.filter(n => n.s === t.s)) wrap(t, n.a, n.b, 'hl', { 'data-id': n.id, 'data-c': n.color || 'y' });
+    for (const n of this.notes.filter(n => n.s === t.s && !n.del)) wrap(t, n.a, n.b, 'hl', { 'data-id': n.id, 'data-c': n.color || 'y' });
     if (this.hits?.s === t.s) for (const [a, b] of this.hits.ranges) wrap(t, a, b, 'hit');
     this.#index(t);
     t.anchors = {};
@@ -156,20 +156,23 @@ export class FlowDoc {
     return { s, p };
   }
   async anchorOf(pos) { const t = await this.tpl(pos.s); return { s: pos.s, o: this.offsetOfPage(t, pos.p) }; }
+  #weights() { // 尚未载入的章节按已知章节的平均长度估算，避免进度条在载入过程中来回跳
+    const known = this.sizes.filter(Boolean); const avg = known.length ? known.reduce((a, b) => a + b, 0) / known.length : 1;
+    return this.sizes.map(x => x || avg);
+  }
   progressOf({ s, o }) {
-    const total = this.sizes.reduce((a, b) => a + (b || 1), 0) || 1;
-    let before = 0; for (let i = 0; i < s; i++) before += this.sizes[i] || 1;
-    const t = this.tpls.get(s);
-    const frac = t?.len ? clamp(o / t.len, 0, 1) : 0;
-    return clamp((before + frac * (this.sizes[s] || 1)) / total, 0, 1);
+    const w = this.#weights(), total = w.reduce((a, b) => a + b, 0) || 1;
+    let before = 0; for (let i = 0; i < s; i++) before += w[i];
+    const len = this.sizes[s] || this.tpls.get(s)?.len || 0;
+    const frac = len ? clamp(o / len, 0, 1) : 0;
+    return clamp((before + frac * w[s]) / total, 0, 1);
   }
   async anchorOfProgress(f) {
-    const total = this.sizes.reduce((a, b) => a + (b || 1), 0) || 1;
+    const w = this.#weights(), total = w.reduce((a, b) => a + b, 0) || 1;
     let acc = 0, target = f * total;
     for (let s = 0; s < this.n; s++) {
-      const sz = this.sizes[s] || 1;
-      if (acc + sz >= target || s === this.n - 1) { const t = await this.tpl(s); return { s, o: Math.floor(clamp((target - acc) / sz, 0, 1) * t.len) }; }
-      acc += sz;
+      if (acc + w[s] >= target || s === this.n - 1) { const t = await this.tpl(s); return { s, o: Math.floor(clamp((target - acc) / w[s], 0, 1) * t.len) }; }
+      acc += w[s];
     }
     return { s: 0, o: 0 };
   }
@@ -245,6 +248,20 @@ export class FlowDoc {
     while ((n = w.nextNode())) { if (n === node) return off + local; off += n.data.length; }
     return off;
   }
+  // 笔记所在的块级段落（供导出「围绕原文」的笔记用）：返回克隆的段落与高亮在段内的偏移
+  async contextOf(n) {
+    const t = await this.tpl(n.s);
+    if (!t.nodes?.length) return null;
+    const { node } = this.#locate(t, clamp(n.a, 0, Math.max(0, t.len - 1)));
+    const blk = node.parentElement?.closest('p,li,blockquote,h1,h2,h3,h4,h5,h6,td,th,pre,figcaption,dd,dt,.math-block');
+    if (!blk || !t.el.contains(blk)) return null;
+    const bs = offsetOfNode(t, blk), len = blk.textContent.length;
+    const clone = blk.cloneNode(true);
+    clone.querySelectorAll('mark.hl, mark.hit').forEach(m => m.replaceWith(...m.childNodes));
+    clone.normalize();
+    markRange(clone, Math.max(0, n.a - bs), Math.min(len, n.b - bs), 'zb-q');
+    return { el: clone, more: n.b > bs + len };
+  }
   async textOf(s) { const t = await this.tpl(s); return t.el.textContent; }
   async search(q, onResult, signal) {
     const ql = q.toLowerCase(); let count = 0;
@@ -264,6 +281,7 @@ export class FlowDoc {
   destroy() { this.host.remove(); this.book.destroy?.(); }
 }
 
+function textLen(html) { const t = document.createElement('template'); t.innerHTML = html; return t.content.textContent.length; }
 function firstText(n) { const w = document.createTreeWalker(n, NodeFilter.SHOW_TEXT); return w.nextNode(); }
 function offsetOfNodeIn(root, el) {
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); let off = 0, n;
@@ -272,8 +290,10 @@ function offsetOfNodeIn(root, el) {
 }
 function offsetOfNode(t, el) { return offsetOfNodeIn(t.el, el); }
 
+export function markRange(el, a, b, cls) { wrap({ el }, a, b, cls); }
 function wrap(t, a, b, cls, attrs = {}) {
   if (b <= a) return;
+  idx(t); // 先前的高亮会把文本节点拆开，每次都按最新的节点重新编号
   const segs = [];
   for (let i = 0; i < t.nodes.length; i++) {
     const s0 = t.starts[i], n = t.nodes[i], s1 = s0 + n.data.length;
@@ -298,9 +318,8 @@ export class FlowScroll {
     this.el.append(this.inner);
     stage.append(this.el);
     this.loaded = new Map();
-    this.io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting && this.#extend(+e.target.dataset.dir)), { root: this.el, rootMargin: '800px 0px' });
-    this.topSentinel = h('div', { class: 'sentinel', dataset: { dir: -1 } });
-    this.botSentinel = h('div', { class: 'sentinel', dataset: { dir: 1 } });
+    this.gen = 0;
+    // 不用 IntersectionObserver：它只在「进出」时回调，章节较短时哨兵一直在视野内，一旦某次回调被忙碌标记吞掉就再也不会触发，表现为「滑不动」。
     this.el.addEventListener('scroll', () => this.#onScroll(), { passive: true });
     let down;
     this.el.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, t: performance.now(), target: e.target }; });
@@ -314,26 +333,34 @@ export class FlowScroll {
     this.el.addEventListener('click', e => { if (e.target.closest('a[href]')) e.preventDefault(); });
   }
   get spread() { return false; }
+  #decorate(el, s) {
+    el.querySelectorAll('mark.hl').forEach(m => m.replaceWith(...m.childNodes));
+    el.normalize();
+    for (const n of this.doc.notes.filter(n => n.s === s && !n.del)) wrap({ el }, n.a, n.b, 'hl', { 'data-id': n.id, 'data-c': n.color || 'y' });
+  }
   async #section(s) {
     if (this.loaded.has(s)) return this.loaded.get(s);
     const html = await this.doc.load(s);
     const el = h('section', { class: 'flow-content scroll-section', lang: this.doc.lang || null, dataset: { s } });
     el.innerHTML = html;
-    for (const n of this.doc.notes.filter(n => n.s === s)) { const t = { el }; idx(t); wrap(t, n.a, n.b, 'hl', { 'data-id': n.id, 'data-c': n.color || 'y' }); }
+    this.#decorate(el, s);
     this.loaded.set(s, el);
     return el;
   }
   async open({ s, o }) {
+    const gen = ++this.gen;
     this.busy = true;
-    this.inner.replaceChildren();
-    this.loaded.clear();
-    this.first = this.last = s;
-    const el = await this.#section(s);
-    this.inner.append(this.topSentinel, el, this.botSentinel);
-    this.io.observe(this.topSentinel); this.io.observe(this.botSentinel);
-    await new Promise(r => requestAnimationFrame(r));
-    this.#scrollToOffset(el, o);
-    this.busy = false;
+    try {
+      const el = await this.#section(s);
+      if (gen !== this.gen) return;
+      this.inner.replaceChildren(el);
+      this.loaded.clear(); this.loaded.set(s, el);
+      this.first = this.last = s;
+      await new Promise(r => { requestAnimationFrame(r); setTimeout(r, 80); }); // 后台页签里 rAF 会暂停，不能无限等
+      if (gen !== this.gen) return;
+      this.#scrollToOffset(el, o);
+    } finally { if (gen === this.gen) { this.busy = false; this.extending = false; } }
+    await this.#pump(gen);
     this.#onScroll();
   }
   go(a) { return this.open(a); }
@@ -346,46 +373,80 @@ export class FlowScroll {
     const rc = r.getBoundingClientRect(), base = this.el.getBoundingClientRect();
     this.el.scrollTop += rc.top - base.top - 64;
   }
-  async #extend(dir) {
-    if (this.busy || this.extending) return;
-    const s = dir > 0 ? this.last + 1 : this.first - 1;
-    if (s < 0 || s >= this.doc.n) return;
+  // 按几何位置补足上下章节：任何时候离边缘不足 900px 就继续接上相邻章节
+  async #pump(gen = this.gen) {
+    if (this.extending || this.busy) { this.again = true; return; }
     this.extending = true;
-    const el = await this.#section(s);
-    if (dir > 0) { this.botSentinel.before(el); this.last = s; }
-    else {
-      const before = this.el.scrollHeight;
-      this.topSentinel.after(el); this.first = s;
-      this.el.scrollTop += this.el.scrollHeight - before;
+    try {
+      for (let guard = 0; guard < 8 && gen === this.gen; guard++) {
+        const { scrollTop, scrollHeight, clientHeight } = this.el;
+        let dir = 0;
+        if (scrollHeight - scrollTop - clientHeight < 900 && this.last + 1 < this.doc.n) dir = 1;
+        else if (scrollTop < 900 && this.first > 0) dir = -1;
+        if (!dir) break;
+        const s = dir > 0 ? this.last + 1 : this.first - 1;
+        const el = await this.#section(s);
+        if (gen !== this.gen) break;
+        if (dir > 0) { this.inner.append(el); this.last = s; }
+        else {
+          const before = this.el.scrollHeight;
+          this.inner.prepend(el); this.first = s;
+          this.el.scrollTop += this.el.scrollHeight - before;
+        }
+        // 只保留附近几章，控制 DOM 规模
+        while (this.last - this.first >= 4) {
+          const cur = this.anchor()?.s ?? s;
+          if (cur - this.first > this.last - cur) { const old = this.loaded.get(this.first); const hgt = old?.offsetHeight || 0; old?.remove(); this.loaded.delete(this.first++); this.el.scrollTop -= hgt; }
+          else { this.loaded.get(this.last)?.remove(); this.loaded.delete(this.last--); }
+        }
+      }
+    } catch (e) { console.warn(e); }
+    finally {
+      if (gen === this.gen) this.extending = false;
+      if (this.again && gen === this.gen) { this.again = false; this.#pump(gen); }
     }
-    // 只保留附近几章，控制 DOM 规模
-    const keep = 4;
-    while (this.last - this.first >= keep) {
-      const cur = this.anchor()?.s ?? s;
-      if (cur - this.first > this.last - cur) { const old = this.loaded.get(this.first); const hgt = old.offsetHeight; old.remove(); this.loaded.delete(this.first++); this.el.scrollTop -= hgt; }
-      else { this.loaded.get(this.last).remove(); this.loaded.delete(this.last--); }
-    }
-    this.extending = false;
   }
+  // 阅读线（距顶 56px）下的第一个文字节点：按几何二分，不依赖 caretPositionFromPoint，避免落在空白处时跳回章首
   anchor() {
-    const r = this.el.getBoundingClientRect();
-    const x = r.left + r.width / 2, y = r.top + 56;
-    let node, off;
-    if (document.caretPositionFromPoint) { const c = document.caretPositionFromPoint(x, y); node = c?.offsetNode; off = c?.offset; }
-    else if (document.caretRangeFromPoint) { const c = document.caretRangeFromPoint(x, y); node = c?.startContainer; off = c?.startOffset; }
-    const sec = (node?.nodeType === 3 ? node.parentElement : node)?.closest?.('.scroll-section');
-    if (!sec) { const any = [...this.inner.querySelectorAll('.scroll-section')].find(e => e.getBoundingClientRect().bottom > r.top + 56); return any ? { s: +any.dataset.s, o: 0 } : null; }
-    return { s: +sec.dataset.s, o: this.doc.offsetIn(sec, node, off || 0) };
+    const r = this.el.getBoundingClientRect(), y = r.top + 56;
+    if (this.last === this.doc.n - 1 && this.el.scrollTop + this.el.clientHeight >= this.el.scrollHeight - 2) { // 滑到底：进度记满
+      const sec = this.loaded.get(this.last); if (sec) return { s: this.last, o: sec.textContent.length };
+    }
+    const secs = [...this.inner.querySelectorAll('.scroll-section')];
+    let sec = secs.find(e => e.getBoundingClientRect().bottom > y) || secs[secs.length - 1];
+    if (!sec) return null;
+    const t = { el: sec }; idx(t);
+    const rect = i => {
+      const n = t.nodes[i]; if (!n.data.trim()) return null;
+      const rg = document.createRange(); rg.selectNodeContents(n);
+      const rs = rg.getClientRects(); return rs.length ? { top: rs[0].top, bottom: rs[rs.length - 1].bottom } : null;
+    };
+    let lo = 0, hi = t.nodes.length - 1, hit = -1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      let k = m, rc = null;
+      while (k <= hi && !(rc = rect(k))) k++;
+      if (!rc) { hi = m - 1; continue; }
+      if (rc.bottom > y) { hit = k; hi = m - 1; } else lo = k + 1;
+    }
+    if (hit < 0) return { s: +sec.dataset.s, o: Math.max(0, t.len - 1) };
+    const rc = rect(hit), n = t.nodes[hit];
+    const frac = rc.bottom > rc.top ? clamp((y - rc.top) / (rc.bottom - rc.top), 0, 1) : 0;
+    return { s: +sec.dataset.s, o: t.starts[hit] + Math.floor(frac * n.data.length) };
   }
   #onScroll() {
-    if (this.busy) return;
     cancelAnimationFrame(this.raf);
-    this.raf = requestAnimationFrame(() => { const a = this.anchor(); if (a) this.cb.onChange?.(a); });
+    this.raf = requestAnimationFrame(() => {
+      this.#pump();
+      if (this.busy) return;
+      const a = this.anchor(); if (a) this.cb.onChange?.(a);
+    });
   }
   turn(dir) { this.el.scrollBy({ top: dir * (this.el.clientHeight - 72), behavior: 'smooth' }); return Promise.resolve(true); }
   relayout() { const a = this.anchor(); return a ? this.open(a) : null; }
-  refreshNotes() { const a = this.anchor(); if (a) this.open(a); }
-  destroy() { this.io.disconnect(); this.el.remove(); }
+  // 笔记变化：原地重画高亮，不动滚动位置
+  refreshNotes() { for (const [s, el] of this.loaded) this.#decorate(el, s); }
+  destroy() { this.gen++; cancelAnimationFrame(this.raf); this.el.remove(); }
 }
 function idx(t) {
   const w = document.createTreeWalker(t.el, NodeFilter.SHOW_TEXT);

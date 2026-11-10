@@ -8,6 +8,7 @@ import { openFlowBook } from './formats.js';
 import { pdfToBook } from './reflow.js';
 import { selectionQuads, mergeImported, exportPdf, tidy } from './annot.js';
 import { applyTheme, effectiveTheme, THEMES } from './theme.js';
+import { fragmentToMarkdown, texOf, copyText, makeZip, saveBlob } from './mdcopy.js';
 
 const TURNS = [['curl', '仿真'], ['cover', '覆盖'], ['slide', '平移'], ['fade', '淡入'], ['scroll', '滚动']];
 const COLORS = [['y', '缃'], ['g', '青'], ['b', '黛'], ['r', '绛']];
@@ -52,7 +53,7 @@ export class Reader {
       this.#startSession();
       this.#scanAnnots();
       if (doc.kind === 'pdf' && cropOn()) doc.computeCrop().then(() => { if (this.doc === doc && doc.crop && store.settings.turn !== 'scroll') this.#mountView(this.anchor); });
-      if (doc.kind === 'flow') setTimeout(() => doc.ensureSizes().then(() => this.#updateUI()), 1500);
+      if (doc.kind === 'flow') setTimeout(() => doc.ensureSizes().then(() => this.doc === doc && this.#updateUI()), 300);
       this.#hint();
     } catch (e) {
       console.error(e);
@@ -181,8 +182,7 @@ export class Reader {
   #updateUI() {
     if (!this.anchor || !this.doc) return;
     const p = this.#progress();
-    if (!this.scrubbing) this.ui.range.value = Math.round(p * 1000);
-    this.ui.range.style.setProperty('--v', p);
+    if (!this.scrubbing) { this.ui.range.value = Math.round(p * 1000); this.ui.range.style.setProperty('--v', +this.ui.range.value / 1000); }
     const label = this.#label();
     this.ui.sub.textContent = this.doc.kind === 'pdf' ? `${label} · 共 ${this.doc.n} 页` : this.doc.book.reflow && this.anchor.page != null ? `${label} · 原书第 ${this.anchor.page + 1} 页` : label;
     this.ui.hudL.textContent = this.doc.kind === 'pdf' ? '' : (this.view instanceof Pager ? '' : label);
@@ -219,6 +219,12 @@ export class Reader {
     if (mark && !this.root.classList.contains('chrome')) { const n = this.notes.find(x => x.id === mark.dataset.id); if (n) { this.#showNoteFor(n, mark.getBoundingClientRect()); return; } }
     const ann = e && this.doc?.kind === 'pdf' && !this.root.classList.contains('chrome') ? document.elementsFromPoint(e.clientX, e.clientY).find(el => el.matches?.('.ann-q, .ann-pin, .ann-box')) : null;
     if (ann) { const n = this.notes.find(x => x.id === ann.dataset.id); if (n) { this.#showNoteFor(n, ann.getBoundingClientRect()); return; } }
+    const tex = e?.target?.closest?.('[data-tex]');
+    if (tex && !this.sheet && !this.ui.notePop.classList.contains('show')) {
+      copyText(texOf(tex)).then(ok => { toast(ok ? '公式已复制' : '复制失败，请长按选中后复制'); });
+      tex.classList.add('copied'); setTimeout(() => tex.classList.remove('copied'), 700);
+      return;
+    }
     if (this.ui.notePop.classList.contains('show')) { this.ui.notePop.classList.remove('show'); return; }
     if (this.sheet) { this.#closeSheets(); return; }
     if (this.root.classList.contains('chrome')) { this.#chrome(false); return; }
@@ -294,7 +300,7 @@ export class Reader {
     const a = this.doc.offsetIn(root, range.startContainer, range.startOffset);
     let b = endRoot && +endRoot.dataset.s === s ? this.doc.offsetIn(endRoot, range.endContainer, range.endOffset) : a + sel.toString().length;
     if (b <= a) return;
-    this.sel = { s, a, b, text: sel.toString().trim().slice(0, 2000) };
+    this.sel = { s, a, b, text: sel.toString().trim().slice(0, 2000), md: this.book.format === 'md' ? fragmentToMarkdown(range.cloneContents()) : null };
     this.#showSelPop(range);
   }, 260);
   // PDF：选区落在某页文字层上，换算成该页的高亮四边形
@@ -314,7 +320,7 @@ export class Reader {
       ...COLORS.map(([c, name]) => h('button', { class: 'sw c-' + c, title: name, 'aria-label': '划线：' + name, onclick: () => this.#addNote(c) })),
       h('span', { class: 'sep' }),
       h('button', { class: 'pb', html: icon('note') + '<span>笔记</span>', onclick: () => this.#addNote('y', true) }),
-      h('button', { class: 'pb', html: icon('copy') + '<span>复制</span>', onclick: () => { navigator.clipboard?.writeText(this.sel.text); toast('已复制'); this.#hideSel(true); } }),
+      h('button', { class: 'pb', html: icon('copy') + '<span>复制</span>', onclick: () => { copyText(this.sel.md || this.sel.text); toast('已复制'); this.#hideSel(true); } }),
       h('button', { class: 'pb', html: icon('search') + '<span>搜索</span>', onclick: () => { const q = this.sel.text.slice(0, 30); this.#hideSel(true); this.#openSearch(q); } }),
     );
     const rects = range.getClientRects(); const rc = rects[0] || range.getBoundingClientRect();
@@ -531,8 +537,10 @@ export class Reader {
     } else {
       const notes = this.#sortedNotes();
       const pdfNotes = this.book.format === 'pdf' && this.notes.some(n => n.kind === 'pdf');
-      const acts = notes.length || pdfNotes ? h('div', { class: 'note-acts' },
-        notes.length ? h('button', { class: 'link-btn', html: icon('file') + '<span>导出 Markdown</span>', onclick: () => this.#exportNotes() }) : null,
+      const zipBook = !!this.doc?.book?.zipBlob;
+      const acts = notes.length || pdfNotes || zipBook ? h('div', { class: 'note-acts' },
+        notes.length ? h('button', { class: 'link-btn', html: icon('file') + `<span>${this.doc?.book?.assets?.size ? '导出笔记（zip）' : '导出 Markdown'}</span>`, onclick: () => this.#exportNotes() }) : null,
+        zipBook ? h('button', { class: 'link-btn', html: icon('upload') + '<span>下载原书（zip）</span>', onclick: () => this.#downloadZipBook() }) : null,
         pdfNotes ? h('button', { class: 'link-btn', html: icon('upload') + '<span>下载含笔记的 PDF</span>', onclick: () => this.#downloadPdf() }) : null) : null;
       const target = n => n.kind === 'pdf' || this.doc.kind === 'pdf' ? (n.page != null ? { page: n.page } : null) : n.s != null ? { s: n.s, o: n.a } : n.page != null ? { page: n.page } : null;
       body.replaceChildren(notes.length ? h('ul', { class: 'note-list' }, notes.map(n => h('li', { class: 'c-' + (n.color || 'y') + (n.src === 'pdf' ? ' from-pdf' : '') },
@@ -575,18 +583,30 @@ export class Reader {
     const y = n => n.quads?.[0]?.[1] ?? n.rect?.[3] ?? 0;
     return this.notes.filter(n => !n.del).sort((a, b) => (a.page ?? -1) - (b.page ?? -1) || (a.s ?? 0) - (b.s ?? 0) || (a.a ?? 0) - (b.a ?? 0) || y(b) - y(a));
   }
-  #exportNotes() {
-    const lines = [`# ${this.book.title}`, this.book.author ? `\n${this.book.author}\n` : ''];
+  // 导出笔记：流式书按「原文段落 + 划线处标记 + 笔记」成段输出；带配图的 Markdown 压缩包连图片一并打成 zip
+  async #exportNotes() {
+    const book = this.book, flow = this.doc.kind === 'flow';
+    const images = new Set();
+    const lines = [`# ${book.title}`, book.author ? `\n${book.author}\n` : ''];
+    if (flow) lines.push('\n*每条笔记先引出所在的原文段落，其中 ==这样== 标出的是划线部分。*\n');
     let last = '';
     for (const n of this.#sortedNotes()) {
       if (n.label !== last) { lines.push(`\n## ${n.label}\n`); last = n.label; }
-      if (n.text) lines.push(`> ${n.text.replace(/\n/g, '\n> ')}\n`);
+      let quote = n.text || '';
+      if (flow && n.s != null) {
+        try { const c = await this.doc.contextOf(n); const md = c && fragmentToMarkdown(c.el, { images }); if (md) quote = md + (c.more ? ' …' : ''); } catch (e) { console.warn(e); }
+      }
+      if (quote) lines.push(quote.split('\n').map(l => l ? `> ${l}` : '>').join('\n') + '\n');
       if (n.note) lines.push(`${n.by ? `**${n.by}**：` : ''}${n.note}\n`);
     }
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
-    const a = h('a', { href: URL.createObjectURL(blob), download: `${this.book.title} · 笔记.md` }); a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    const md = lines.join('\n'), name = `${book.title} · 笔记`;
+    const assets = this.doc.book?.assets;
+    if (assets?.size) {
+      const files = [['笔记.md', md], ...[...images].filter(p => assets.has(p)).map(p => [p, assets.get(p)])];
+      saveBlob(makeZip(files), name + '.zip');
+    } else saveBlob(new Blob([md], { type: 'text/markdown' }), name + '.md');
   }
+  #downloadZipBook() { const z = this.doc?.book?.zipBlob; if (z) saveBlob(z, `${this.book.title}.zip`); }
 
   // ---------- 排版面板 ----------
   #renderTypePanel() {
@@ -780,7 +800,7 @@ export class Reader {
 
     // 进度条拖动预览
     const r = ui.range;
-    r.addEventListener('input', () => { this.scrubbing = true; this.#preview(+r.value / 1000); });
+    r.addEventListener('input', () => { this.scrubbing = true; r.style.setProperty('--v', +r.value / 1000); this.#preview(+r.value / 1000); });
     r.addEventListener('change', async () => {
       const f = +r.value / 1000; this.scrubbing = false; ui.bubble.classList.remove('show');
       if (this.doc.kind === 'pdf') this.go({ page: Math.round(f * (this.doc.n - 1)) });
@@ -789,6 +809,16 @@ export class Reader {
     r.addEventListener('pointerup', () => setTimeout(() => ui.bubble.classList.remove('show'), 400));
 
     document.addEventListener('selectionchange', () => this.#onSelection());
+    // Markdown 书：选中的文字和公式复制出去的是 Markdown 原文（公式还原为 $…$ / $$…$$）
+    document.addEventListener('copy', e => {
+      if (this.root.hidden || !this.doc || this.doc.kind !== 'flow' || this.book?.format !== 'md' || this.editing) return;
+      const sel = getSelection(); if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0), common = range.commonAncestorContainer;
+      if (!this.stage.contains(common)) return;
+      const md = fragmentToMarkdown(range.cloneContents());
+      if (!md) return;
+      e.clipboardData.setData('text/plain', md); e.preventDefault();
+    });
     document.addEventListener('keydown', e => this.#key(e));
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { this.#wake(); this.lastActive = Date.now(); } else this.#saveNow(); });
     for (const ev of ['pointerdown', 'keydown', 'wheel']) this.root.addEventListener(ev, () => { this.lastActive = Date.now(); }, { passive: true });

@@ -14,8 +14,8 @@ const DATA = process.env.DATA_DIR || path.join(ROOT, 'data');
 const COVERS = path.join(DATA, 'covers');
 const CACHE_FILE = path.join(DATA, 'scan-cache.json');
 const META = await readJSON(path.join(ROOT, 'meta.json'), { categories: [], series: {}, books: {} });
-const EXT = new Set(['pdf', 'epub', 'mobi', 'azw', 'azw3', 'fb2', 'fbz', 'txt', 'md', 'markdown', 'html', 'htm', 'xhtml', 'docx', 'doc', 'cbz']);
-const FORMAT = { azw: 'mobi', azw3: 'mobi', markdown: 'md', htm: 'html', xhtml: 'html', fbz: 'fb2' };
+const EXT = new Set(['pdf', 'epub', 'mobi', 'azw', 'azw3', 'fb2', 'fbz', 'txt', 'md', 'markdown', 'html', 'htm', 'xhtml', 'docx', 'doc', 'cbz', 'zip']);
+const FORMAT = { azw: 'mobi', azw3: 'mobi', markdown: 'md', htm: 'html', xhtml: 'html', fbz: 'fb2', zip: 'md' };
 
 async function readJSON(f, d) { try { return JSON.parse(await fsp.readFile(f, 'utf8')); } catch { return d; } }
 const has = async cmd => run('sh', ['-c', `command -v ${cmd}`]).then(() => true, () => false);

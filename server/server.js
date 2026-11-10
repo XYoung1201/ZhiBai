@@ -23,7 +23,7 @@ const KEYFILE = path.join(DATA, 'key.txt');
 const TRASH = path.join(DATA, 'trash');
 const UPLOAD_DIR = path.join(BOOKS, '上传');
 const UPLOAD_LIMIT = 512 * 1024 * 1024;
-const BOOK_EXT = new Set(['pdf', 'epub', 'mobi', 'azw', 'azw3', 'fb2', 'fbz', 'txt', 'md', 'markdown', 'html', 'htm', 'xhtml', 'docx', 'doc', 'cbz']);
+const BOOK_EXT = new Set(['pdf', 'epub', 'mobi', 'azw', 'azw3', 'fb2', 'fbz', 'txt', 'md', 'markdown', 'html', 'htm', 'xhtml', 'docx', 'doc', 'cbz', 'zip']);
 
 const MIME = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8',

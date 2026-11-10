@@ -4,7 +4,7 @@ import DOMPurify from '../vendor/purify.es.mjs';
 
 export const EXT_FORMAT = {
   pdf: 'pdf', epub: 'epub', mobi: 'mobi', azw: 'mobi', azw3: 'mobi', kf8: 'mobi', prc: 'mobi', fb2: 'fb2', fbz: 'fb2', 'fb2.zip': 'fb2',
-  txt: 'txt', text: 'txt', md: 'md', markdown: 'md', html: 'html', htm: 'html', xhtml: 'html', docx: 'docx', doc: 'doc', cbz: 'cbz',
+  txt: 'txt', text: 'txt', md: 'md', markdown: 'md', html: 'html', htm: 'html', xhtml: 'html', docx: 'docx', doc: 'doc', cbz: 'cbz', zip: 'md',
 };
 export const ACCEPT = Object.keys(EXT_FORMAT).map(e => '.' + e).join(',');
 export function formatOf(name = '') {
@@ -331,8 +331,11 @@ export async function openFlowBook(blob, { name = '', format, title, author } = 
     case 'txt': book = plainToBook(decodeText(await blob.arrayBuffer()), fallback.title); break;
     case 'doc': book = plainToBook(await docToText(await blob.arrayBuffer()), fallback.title); break;
     case 'md': {
-      const { markdownToBook } = await import('./markdown.js');
-      book = markdownToBook(decodeText(await blob.arrayBuffer()), fallback); break;
+      const { markdownToBook, markdownZipToBook } = await import('./markdown.js');
+      const head = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+      if (head[0] === 0x50 && head[1] === 0x4b) { book = await markdownZipToBook(blob, fallback); book.zipBlob = blob; }
+      else book = markdownToBook(decodeText(await blob.arrayBuffer()), fallback);
+      break;
     }
     case 'html': book = htmlToBook(decodeText(await blob.arrayBuffer()), fallback); break;
     case 'docx': {
