@@ -44,11 +44,15 @@ function renderMath(el, tex, displayMode) {
   const opts = { displayMode, trust: false, throwOnError: true, strict: false, maxExpand: 1000, maxSize: [50, 50] };
   el.dataset.tex = tex;
   el.className = displayMode ? 'math-block' : 'math-inline';
-  try { temml.render(tex, el, opts); }
+  // \tag 会让 Temml 生成 width:100% 的表格，在可横向滚动的容器里会塌成空白：自己排编号
+  let tag = null;
+  const body = tex.replace(/\\tag(\*?)\{([^}]*)\}/, (m, star, t) => { tag = star ? t : '(' + t + ')'; return ''; });
+  try { temml.render(cleanTex(body), el, opts); }
   catch {
-    try { el.textContent = ''; temml.render(cleanTex(tex), el, opts); }
-    catch { el.textContent = displayMode ? tex : '$' + tex + '$'; el.classList.add('math-error'); }
+    try { el.textContent = ''; temml.render(cleanTex(tex).replace(/\\tag\*?\{[^}]*\}/, ''), el, opts); }
+    catch { el.textContent = displayMode ? tex : '$' + tex + '$'; el.classList.add('math-error'); return; }
   }
+  if (tag && displayMode) { const t = document.createElement('span'); t.className = 'math-tag'; t.textContent = tag; el.append(t); }
 }
 
 const isRemote = u => /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(u);

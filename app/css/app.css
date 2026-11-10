@@ -444,6 +444,8 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .flow-content li p { text-indent: 0; }
 .flow-content .math-block { margin: .8em 0; padding: .15em 0; max-width: 100%; overflow-x: auto; break-inside: avoid; touch-action: pan-x pan-y; text-indent: 0; }
 .flow-content span.math-block { display: block; }
+.flow-content .math-block { position: relative; }
+.flow-content .math-tag { position: absolute; right: .3em; top: 50%; transform: translateY(-50%); font-variant-numeric: tabular-nums; }
 .flow-content .math-block, .flow-content .math-inline { cursor: copy; border-radius: 4px; transition: background-color .25s; }
 .flow-content .math-block:hover, .flow-content .math-inline:hover { background: var(--accent-soft); }
 .flow-content .math-block.copied, .flow-content .math-inline.copied { background: var(--hl-g, var(--accent-soft)); }
