@@ -81,7 +81,7 @@ async function boot() {
     for (let i = 0; i < 40 && !store.books.get(location.hash.slice(4)); i++) await sleep(100);
     route();
   }
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
   if (store.offline) toast('离线中：本机书籍仍可阅读');
 }
 boot();

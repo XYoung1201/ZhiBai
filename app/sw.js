@@ -1,5 +1,5 @@
 // 知白 · 离线外壳：页面与脚本走「网络优先、断网回退缓存」；字体与库走缓存优先
-const V = 'zb-v1';
+const V = 'zb-v2';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/main.js', 'js/util.js', 'js/db.js', 'js/store.js', 'js/library.js', 'js/reader.js', 'js/pager.js', 'js/flow.js', 'js/pdfdoc.js', 'js/formats.js', 'js/markdown.js', 'js/mdcopy.js', 'vendor/temml/Temml-Local.css', 'js/opener.js', 'js/theme.js', 'icons/icon.svg'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('zb-') && k !== V).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
@@ -11,5 +11,6 @@ self.addEventListener('fetch', e => {
     e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request).then(res => { if (res.ok && res.status === 200) { const copy = res.clone(); caches.open(V).then(c => c.put(e.request, copy)); } return res; })));
     return;
   }
-  e.respondWith(fetch(e.request).then(res => { if (res.ok && res.status === 200) { const copy = res.clone(); caches.open(V).then(c => c.put(e.request, copy)); } return res; }).catch(() => caches.match(e.request).then(r => r || caches.match('index.html'))));
+  // Cloudflare 把 js/css 的 Cache-Control 改写成 max-age=14400，浏览器会 4 小时不去问服务器；这里强制带校验头回源（命中则 304，很便宜）
+  e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(res => { if (res.ok && res.status === 200) { const copy = res.clone(); caches.open(V).then(c => c.put(e.request, copy)); } return res; }).catch(() => caches.match(e.request).then(r => r || caches.match('index.html'))));
 });
