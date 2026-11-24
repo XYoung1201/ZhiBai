@@ -1,4 +1,5 @@
 // 扫描书库目录 → data/catalog.json；PDF 用 poppler 取页数与封面。增量：未变化的文件不重复处理。
+// 每本书记下整个文件的 MD5（上传去重用）和书中第一段正文（书籍详情里的「摘要」）。
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -294,10 +295,237 @@ const cleanMetaTitle = t => {
 };
 
 await fsp.mkdir(COVERS, { recursive: true });
+// ---------- 摘要：书中第一段正文 ----------
+// 挑段规则与 app/js/summary.js 保持一致（浏览器为服务器读不了的格式补算）
+const SV = 6; // 摘要规则版本：改了规则就加一，已扫描的书会重新提取
+const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ensp: ' ', emsp: ' ', thinsp: ' ', mdash: '—', ndash: '–', ldquo: '“', rdquo: '”', lsquo: '‘', rsquo: '’', hellip: '…', middot: '·', bull: '•' };
+const decodeEnt = s => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+  if (e[0] !== '#') return ENT[e.toLowerCase()] ?? m;
+  try { return String.fromCodePoint(/x/i.test(e[1]) ? parseInt(e.slice(2), 16) : +e.slice(1)); } catch { return ''; }
+});
+const CJK = '\\u2e80-\\u9fff\\uf900-\\ufaff\\uff00-\\uffef';
+const CJK_GAP = new RegExp(`([${CJK}]) (?=[${CJK}])`, 'g'), CJK_END = new RegExp(`[${CJK}]$`), CJK_START = new RegExp(`^[${CJK}]`);
+const norm = s => s.replace(/[\s ]+/g, ' ').replace(CJK_GAP, '$1').trim();
+const joinLines = ls => ls.map(l => l.trim()).filter(Boolean)
+  .reduce((a, l) => !a ? l : a.endsWith('-') ? a.slice(0, -1) + l : CJK_END.test(a) || CJK_START.test(l) ? a + l : a + ' ' + l, '');
+// HTML → 段落（去掉注音 <rt>、脚本样式；块级标签处断开）
+const htmlParas = html => html
+  .replace(/<(script|style|head|title|rt|rp)\b[\s\S]*?<\/\1\s*>/gi, ' ')
+  .split(/<\/?(?:p|div|h[1-6]|li|br|blockquote|tr|td|th|section|article|aside|header|footer|dd|dt|table|ul|ol|figure|figcaption|hr)\b[^>]*>/i)
+  .map(s => norm(decodeEnt(s.replace(/<[^>]+>/g, ''))))
+  .filter(Boolean);
+// 排版好的行（PDF 文字层）→ 段落：短而不带标点的行是标题、目录、页眉，单独成段；
+// 行尾是句末标点且明显短于正文行宽时，段落结束。服务器与浏览器两边一致
+const lineWidth = l => { let w = 0; for (const ch of l) w += /[⺀-鿿豈-￯]/.test(ch) ? 2 : 1; return w; }; // 汉字按两格算
+function lineParas(lines) {
+  lines = lines.map(l => l.trim());
+  // 正文行宽取较长那部分行的典型宽度（第 80 百分位），免得一行超长的英文把汉字行都衬成「短行」
+  const ws = lines.map(lineWidth).filter(w => w > 10).sort((a, b) => a - b);
+  const full = ws.length ? ws[Math.floor(ws.length * .8)] : 0;
+  const out = []; let cur = [];
+  const flush = () => { if (cur.length) out.push(cur); cur = []; };
+  for (const l of lines) {
+    if (!l) { flush(); continue; }
+    const ends = /[。！？」”』…：:.!?；;，,]$/.test(l), w = lineWidth(l);
+    if (!ends && w < full * .6) { flush(); out.push([l]); continue; }
+    cur.push(l);
+    if (/[。！？」”』…：:.!?]$/.test(l) && w < full * .8) flush();
+  }
+  flush();
+  return out.map(ls => norm(joinLines(ls))).filter(Boolean);
+}
+// 纯文本 → 段落：空行多（硬换行排版）时按空行分段，否则一行一段
+function textParas(text) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  if (lines.filter(l => !l.trim()).length > lines.length * .25) return text.replace(/\r\n?/g, '\n').split(/\n\s*\n/).map(b => norm(joinLines(b.split('\n')))).filter(Boolean);
+  return lines.map(norm).filter(Boolean);
+}
+function mdParas(text) {
+  text = text.replace(/\r\n?/g, '\n').replace(/^```[\s\S]*?^```/gm, '').replace(/^\$\$[\s\S]*?^\$\$/gm, '');
+  return text.split(/\n\s*\n/).filter(b => !/^\s*(#|\||<|!\[|---|\*\*\*|===)/.test(b))
+    .map(b => norm(joinLines(b.split('\n').map(l => l.replace(/^\s*(>\s*)+/, '').replace(/^\s*([-*+]|\d+[.)])\s+/, '')))
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/\*\*|__|`/g, '')))
+    .filter(Boolean);
+}
+// 版权页、出版信息、目录之类不算正文
+const BOILER = /版权所有|版权信息|版权声明|ISBN|出版社|出版发行|印\s*刷|定\s*价|开\s*本|印\s*张|字\s*数|版\s*次|印\s*次|书\s*号|在版编目|CIP|Copyright|©|All rights reserved|电子书|免责声明|仅供.{0,6}(学习|交流|参考)|www\.|https?:\/\/|扫描|责任编辑|装帧设计|目\s*录|Contents/i;
+// 目录引导点（……、.....）、连着几章的章名（目录）、文字层乱码（「再創創創造造造」这类叠字）也不算
+const junkPara = t => BOILER.test(t) || /\.{4,}|…{3,}|·{4,}|-{4,}|_{4,}/.test(t)
+  || (t.match(/第[一二三四五六七八九十百千\d]+[章节篇部讲回卷]/g) || []).length >= 3
+  || [...t].filter((c, i, a) => i && c === a[i - 1] && c !== ' ').length > t.length * .2
+  || (t.match(/([\u3400-\u9fff])\1\1/g) || []).length >= 2;
+const cjkCount = t => (t.match(/[㐀-鿿]/g) || []).length;
+// 正文要有真正的句读：中文看逗号、句号（顿号多见于目录和列表），西文看句末标点；
+// 中文还要求句读够密（每 40 字至少一个），目录连成一片时只有零星标点
+const sentence = (t, cjk) => cjk >= 5 ? (t.match(/[，。；！？]/g) || []).length >= Math.max(1, cjk / 40) : /[.!?](\s|$)/.test(t);
+function goodPara(t) {
+  if (junkPara(t)) return false;
+  const cjk = cjkCount(t);
+  return sentence(t, cjk) && (cjk >= 30 || (cjk < 5 && t.length >= 120 && t.split(/\s+/).length >= 18));
+}
+// 过长时在句末截断
+function clip(t, max = 220) {
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const end = Math.max(...['。', '！', '？', '；', '. ', '! ', '? '].map(p => cut.lastIndexOf(p)));
+  return end >= max * .45 ? cut.slice(0, end + 1).trim() : cut.replace(/[，,、；;\s]+$/, '') + '…';
+}
+const pick = paras => { for (const p of paras) if (goodPara(p)) return clip(p); return ''; };
+// 整个扫描范围都没有像样的长段落时（短文、单页讲义），退而取第一句像正文的话
+const loosePara = t => { const cjk = cjkCount(t); return !junkPara(t) && sentence(t, cjk) && (cjk >= 10 || (cjk < 5 && t.length >= 40)); };
+const pickLoose = paras => { const p = paras.find(loosePara); return p ? clip(p) : ''; };
+const pickAny = paras => pick(paras) || pickLoose(paras);
+
+// 文本解码：BOM → UTF-8（容忍末尾被截断的半个字）→ GB18030
+function decodeBuf(buf, label) {
+  if (label) { try { return new TextDecoder(label).decode(buf); } catch {} }
+  if (buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) return buf.subarray(3).toString('utf8');
+  if (buf[0] === 0xFF && buf[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  if (buf[0] === 0xFE && buf[1] === 0xFF) { try { return new TextDecoder('utf-16be').decode(buf.subarray(2)); } catch {} }
+  for (let k = 0; k < 4 && k < buf.length; k++) { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, buf.length - k)); } catch {} }
+  try { return new TextDecoder('gb18030').decode(buf); } catch { return buf.toString('latin1'); }
+}
+async function head(file, n) { const fh = await fsp.open(file, 'r'); try { return await readAt(fh, 0, n); } finally { await fh.close(); } }
+
+async function epubSummary(file) {
+  const zip = await openZip(file); if (!zip) return '';
+  try {
+    const container = (await zip.read('META-INF/container.xml'))?.toString('utf8') || '';
+    const opfPath = /full-path\s*=\s*["']([^"']+)["']/.exec(container)?.[1];
+    const opf = opfPath && (await zip.read(opfPath))?.toString('utf8');
+    if (!opf) return '';
+    const items = [...opf.matchAll(/<(?:opf:)?item\b[^>]*>/gi)].map(m => attrs(m[0]));
+    const spine = [...opf.matchAll(/<(?:opf:)?itemref\b[^>]*>/gi)].map(m => attrs(m[0])).filter(a => a.linear !== 'no');
+    const seen = [];
+    for (const s of spine.slice(0, 60)) {
+      const it = items.find(i => i.id === s.idref), p = it && resolve(opfPath, it.href);
+      const html = p && (await zip.read(p, 8 << 20))?.toString('utf8');
+      if (!html) continue;
+      const paras = htmlParas(html.replace(/^[\s\S]*?<body\b[^>]*>/i, ''));
+      const hit = pick(paras); if (hit) return hit;
+      seen.push(...paras);
+    }
+    // 书里没有长段落：先用简介，再退而取第一句像正文的话
+    return pickAny(htmlParas(xmlText(/<dc:description\b[^>]*>([\s\S]*?)<\/dc:description>/i.exec(opf)?.[1] || ''))) || pickLoose(seen);
+  } finally { await zip.close(); }
+}
+
+// MOBI / AZW3 正文：PalmDOC 压缩或不压缩的文本记录（HUFF/CDIC 压缩的交给浏览器补算）
+function palmdoc(src) {
+  const out = Buffer.alloc(src.length * 5 + 16); let o = 0;
+  for (let i = 0; i < src.length;) {
+    const c = src[i++];
+    if (c === 0 || (c >= 9 && c <= 0x7f)) out[o++] = c;
+    else if (c <= 8) { for (let k = 0; k < c && i < src.length; k++) out[o++] = src[i++]; }
+    else if (c >= 0xc0) { out[o++] = 0x20; out[o++] = c ^ 0x80; }
+    else {
+      const x = ((c << 8) | src[i++]) & 0x3fff, dist = x >> 3, len = (x & 7) + 3;
+      if (!dist || dist > o) break;
+      for (let k = 0; k < len; k++, o++) out[o] = out[o - dist];
+    }
+  }
+  return out.subarray(0, o);
+}
+// 去掉文本记录末尾的附加数据（倒序变长整数记长度），再去掉多字节残片
+function trimTrailing(b, flags) {
+  let end = b.length;
+  for (let bit = 1; bit < 16; bit++) {
+    if (!(flags & (1 << bit))) continue;
+    let v = 0; for (const x of b.subarray(Math.max(0, end - 4), end)) { if (x & 0x80) v = 0; v = (v << 7) | (x & 0x7f); }
+    end -= v; if (end <= 0) return b.subarray(0, 0);
+  }
+  if (flags & 1) end -= (b[end - 1] & 3) + 1;
+  return b.subarray(0, Math.max(0, end));
+}
+async function mobiSummary(file) {
+  const fh = await fsp.open(file, 'r');
+  try {
+    const hd = await readAt(fh, 0, 78);
+    if (hd.length < 78 || !/^(BOOKMOBI|TEXtREAd)$/.test(hd.subarray(60, 68).toString('latin1'))) return '';
+    const n = hd.readUInt16BE(76), tbl = await readAt(fh, 78, n * 8), { size } = await fh.stat();
+    const off = i => i < n ? tbl.readUInt32BE(i * 8) : size;
+    const rec = async (i, max = 1 << 20) => i < n && off(i + 1) > off(i) ? readAt(fh, off(i), Math.min(off(i + 1) - off(i), max)) : null;
+    const r0 = await rec(0);
+    if (!r0 || r0.length < 132) return '';
+    const comp = r0.readUInt16BE(0), count = r0.readUInt16BE(8);
+    if (comp !== 1 && comp !== 2) return null; // HUFF/CDIC：服务器不解，交给浏览器
+    const isMobi = r0.subarray(16, 20).toString('latin1') === 'MOBI', hlen = isMobi ? r0.readUInt32BE(20) : 0;
+    const flags = isMobi && hlen >= 0xE4 && r0.length >= 0xF4 ? r0.readUInt16BE(0xF2) : 0;
+    const label = isMobi && r0.readUInt32BE(28) === 65001 ? 'utf-8' : 'windows-1252';
+    const parts = [];
+    for (let i = 1; i <= Math.min(count, 160); i++) {
+      let b = await rec(i); if (!b) break;
+      b = trimTrailing(b, flags);
+      parts.push(comp === 2 ? palmdoc(b) : b);
+      if (i % 20 === 0 || i === Math.min(count, 160)) {
+        const paras = htmlParas(new TextDecoder(label).decode(Buffer.concat(parts)));
+        const hit = i === Math.min(count, 160) ? pickAny(paras) : pick(paras);
+        if (hit) return hit;
+      }
+    }
+    return '';
+  } finally { await fh.close(); }
+}
+
+async function pdfSummary(file) {
+  if (!canPdfText) return null;
+  const { stdout } = await run('pdftotext', ['-f', '1', '-l', '40', '-enc', 'UTF-8', '-q', file, '-'], { maxBuffer: 16 << 20, timeout: 60e3 });
+  return pickAny(stdout.split('\f').flatMap(pg => lineParas(pg.split('\n'))));
+}
+async function docxSummary(file) {
+  const zip = await openZip(file); if (!zip) return '';
+  try {
+    const xml = (await zip.read('word/document.xml', 40 << 20))?.toString('utf8') || '';
+    return pickAny(xml.split(/<\/w:p>/).slice(0, 600).map(p => norm(decodeEnt([...p.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('')))).filter(Boolean));
+  } finally { await zip.close(); }
+}
+async function fb2Summary(file, ext) {
+  let buf;
+  if (ext === 'fbz') {
+    const zip = await openZip(file); if (!zip) return '';
+    try { buf = await zip.read(zip.names.find(n => /\.fb2$/i.test(n)) || zip.names[0]); } finally { await zip.close(); }
+  } else buf = await head(file, 4 << 20);
+  if (!buf) return '';
+  const label = /encoding\s*=\s*["']([\w-]+)["']/i.exec(buf.subarray(0, 200).toString('latin1'))?.[1];
+  const xml = decodeBuf(buf, label);
+  return pickAny(htmlParas(/<body\b[^>]*>([\s\S]*)/i.exec(xml)?.[1] || xml));
+}
+async function zipMdSummary(file) {
+  const zip = await openZip(file); if (!zip) return '';
+  try {
+    const md = zip.names.filter(n => /\.(md|markdown)$/i.test(n) && !/(^|\/)(__MACOSX|\.)/.test(n)).sort()[0];
+    const buf = md && await zip.read(md, 8 << 20);
+    return buf ? pickAny(mdParas(decodeBuf(buf))) : '';
+  } finally { await zip.close(); }
+}
+// 返回摘要字符串；'' 表示读过但没找到合适的段落；null 表示服务器读不了这种格式（由浏览器补算）
+async function bookSummary(file, ext) {
+  try {
+    switch (ext) {
+      case 'pdf': return await pdfSummary(file);
+      case 'epub': return await epubSummary(file);
+      case 'mobi': case 'azw': case 'azw3': return await mobiSummary(file);
+      case 'txt': return pickAny(textParas(decodeBuf(await head(file, 256 << 10))));
+      case 'md': case 'markdown': return pickAny(mdParas(decodeBuf(await head(file, 512 << 10))));
+      case 'html': case 'htm': case 'xhtml': { const t = decodeBuf(await head(file, 2 << 20)); return pickAny(htmlParas(t.replace(/^[\s\S]*?<body\b[^>]*>/i, ''))); }
+      case 'docx': return await docxSummary(file);
+      case 'fb2': case 'fbz': return await fb2Summary(file, ext);
+      case 'zip': return await zipMdSummary(file);
+      default: return null; // doc、cbz
+    }
+  } catch (e) { console.warn('summary failed', file, e.message); return null; }
+}
+
+const md5File = file => new Promise((res, rej) => {
+  const h = crypto.createHash('md5');
+  fs.createReadStream(file).on('data', c => h.update(c)).on('end', () => res(h.digest('hex'))).on('error', rej);
+});
+
 const cache = await readJSON(CACHE_FILE, {});
 const canPdf = await has('pdfinfo');
+const canPdfText = await has('pdftotext');
 const books = [];
-const seen = new Set();
+const seen = new Set(), seenMd5 = new Set();
 
 for await (const file of walk(BOOKS)) {
   const ext = path.extname(file).slice(1).toLowerCase();
@@ -319,9 +547,11 @@ for await (const file of walk(BOOKS)) {
     }
     console.log('scanned', rel);
   }
+  if (!c.md5) c.md5 = await md5File(file);
+  if (c.sv !== SV) { c.summary = await bookSummary(file, ext); c.sv = SV; }
   cache[rel] = c;
-  if (seen.has(c.id)) continue; // 同一本书的重复副本只收一次
-  seen.add(c.id);
+  if (seen.has(c.id) || seenMd5.has(c.md5)) continue; // 同一本书（MD5 相同）的重复副本只收一次
+  seen.add(c.id); seenMd5.add(c.md5);
 
   const base = path.basename(file, path.extname(file));
   const parts = rel.split('/');
@@ -341,6 +571,8 @@ for await (const file of walk(BOOKS)) {
     size: c.size,
     pages: c.pages || null,
     aspect: c.aspect || null,
+    md5: c.md5,
+    summary: c.summary ?? undefined, // '' = 读过但没有合适段落；缺省 = 服务器读不了，由浏览器补
     cover: !!coverStat,
     coverV: coverStat ? Math.floor(coverStat.mtimeMs / 1000).toString(36) : undefined, // 封面换了就换 URL，绕过浏览器缓存
     added: c.added,

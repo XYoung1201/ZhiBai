@@ -40,17 +40,18 @@ const api = {
   postCover: (id, blob) => fetch('api/cover/' + id, { method: 'POST', body: blob }).catch(() => {}),
   fileUrl: id => new URL('api/file/' + id, location.href).href,
   coverUrl: (id, v) => 'api/cover/' + id + (v ? '?v=' + v : ''), // v 随封面文件变化，换封面后不吃浏览器旧缓存
-  // 断线或服务器出错时自动重传一次；服务器按内容去重，重传不会多出一份
-  async upload(file, onProgress, tries = 2) {
+  exists: md5 => api.req('exists?md5=' + md5), // 书库里是否已有这份文件（按整个文件的 MD5）
+  // 断线、服务器出错或传输中损坏（MD5 对不上，409）时自动重传一次；服务器按 MD5 去重，重传不会多出一份
+  async upload(file, onProgress, md5, tries = 2) {
     for (let i = 1; ; i++) {
-      try { return await api.uploadOnce(file, onProgress); }
-      catch (e) { if (i >= tries || (e.status && e.status < 500)) throw e; await new Promise(r => setTimeout(r, 1500)); }
+      try { return await api.uploadOnce(file, onProgress, md5); }
+      catch (e) { if (i >= tries || (e.status && e.status < 500 && e.status !== 409)) throw e; await new Promise(r => setTimeout(r, 1500)); }
     }
   },
-  uploadOnce(file, onProgress) {
+  uploadOnce(file, onProgress, md5) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
-      x.open('PUT', 'api/upload?name=' + encodeURIComponent(file.name));
+      x.open('PUT', 'api/upload?name=' + encodeURIComponent(file.name) + (md5 ? '&md5=' + md5 : ''));
       x.upload.onprogress = e => e.lengthComputable && onProgress?.(e.loaded / e.total);
       x.onload = () => {
         let j = {}; try { j = JSON.parse(x.responseText); } catch {}

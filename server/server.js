@@ -145,16 +145,12 @@ function rebuildCatalog() {
   return queued ||= building.then(() => { queued = null; return rebuildCatalog(); });
 }
 
-// 与 build-catalog.mjs 的 contentId 一致：大小 + 前 256 KiB 的 SHA-1
-async function contentId(file) {
-  const fh = await fsp.open(file, 'r');
-  try {
-    const { size } = await fh.stat();
-    const buf = Buffer.alloc(Math.min(size, 262144));
-    await fh.read(buf, 0, buf.length, 0);
-    return crypto.createHash('sha1').update(String(size)).update(buf).digest('hex').slice(0, 16);
-  } finally { await fh.close(); }
-}
+// 整个文件的 MD5，用于判断「是不是同一本书」
+const md5File = file => new Promise((resolve, reject) => {
+  const h = crypto.createHash('md5');
+  fs.createReadStream(file).on('data', c => h.update(c)).on('end', () => resolve(h.digest('hex'))).on('error', reject);
+});
+const byMd5 = async md5 => (await catalog()).books.find(b => b.md5 === md5 && fs.existsSync(path.join(BOOKS, b.path)));
 
 // ---------- 进度同步 ----------
 // 结构：{ books: { [id]: { progress:{...,t}, marks:{items,t}, notes:{items,t}, stats:{[device]:{[day]:sec}} } }, settings:{..., t} }
@@ -269,10 +265,18 @@ async function api(req, res, route, url) {
     const ov = await readJSON(OVERRIDES, {});
     const clean = {};
     for (const k of ['title', 'author', 'category']) if (typeof patch[k] === 'string') clean[k] = patch[k].slice(0, 200);
+    if (typeof patch.summary === 'string') clean.summary = patch.summary.slice(0, 600); // 服务器读不了的格式由浏览器回填
     ov[arg] = { ...(ov[arg] || {}), ...clean };
     await writeJSON(OVERRIDES, ov);
     catalogCache = null;
     return json(res, 200, { ok: true });
+  }
+
+  // 上传前先按 MD5 问一声：已有这本就不必再传
+  if (name === 'exists' && method === 'GET') {
+    const md5 = (url.searchParams.get('md5') || '').toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(md5)) return json(res, 400, { error: 'bad md5' });
+    return json(res, 200, { book: (await byMd5(md5)) || null });
   }
 
   if (name === 'upload' && method === 'PUT') {
@@ -285,23 +289,26 @@ async function api(req, res, route, url) {
     // 共用一个 .part 时，先断开的那次会把另一次正在写的文件删掉，导致 rename ENOENT。
     const tmp = path.join(UPLOAD_DIR, `.${crypto.randomUUID()}.part`);
     const out = fs.createWriteStream(tmp, { flags: 'wx' });
+    const hash = crypto.createHash('md5');
     let n = 0;
     try {
-      for await (const c of req) { n += c.length; if (n > UPLOAD_LIMIT) throw Object.assign(new Error('文件太大'), { code: 413 }); if (!out.write(c)) await new Promise(r => out.once('drain', r)); }
+      for await (const c of req) { n += c.length; if (n > UPLOAD_LIMIT) throw Object.assign(new Error('文件太大'), { code: 413 }); hash.update(c); if (!out.write(c)) await new Promise(r => out.once('drain', r)); }
       await new Promise((r, j) => out.end(e => e ? j(e) : r()));
     } catch (e) { out.destroy(); await fsp.rm(tmp, { force: true }); throw e; }
+    const md5 = hash.digest('hex');
+    const want = url.searchParams.get('md5');
+    if (want && want !== md5) { await fsp.rm(tmp, { force: true }); return json(res, 409, { error: '文件在传输中损坏，请重试' }); }
     let target;
     try {
-      const id = await contentId(tmp);
-      // 书库里已有同一本（重传、重复导入）：直接返回那本，不再多存一份
-      const have = (await catalog()).books.find(b => b.id === id && fs.existsSync(path.join(BOOKS, b.path)));
+      // 书库里已有 MD5 相同的书（重传、换了文件名再传）：直接返回那本，不再多存一份
+      const have = await byMd5(md5);
       if (have) return json(res, 200, { ok: true, book: have, existed: true });
       for (let i = 1; ; i++) {
         target = path.join(UPLOAD_DIR, i === 1 ? fname : fname.replace(/(\.[^.]+)?$/, `（${i}）$1`));
         try { await fsp.link(tmp, target); break; } // link 在目标已存在时报 EEXIST，不会覆盖并发写入的同名文件
         catch (e) {
           if (e.code !== 'EEXIST') throw e;
-          if (await contentId(target).catch(() => null) === id) break; // 同名且同内容：并发的另一次已经落盘
+          if (await md5File(target).catch(() => null) === md5) break; // 同名且同内容：并发的另一次已经落盘
         }
       }
     } finally { await fsp.rm(tmp, { force: true }); }
