@@ -115,7 +115,7 @@ export class Library {
     const keep = new Set();
     for (const it of items) {
       keep.add(it.key);
-      const sig = JSON.stringify([it.title, it.author, it.type === 'book' ? [it.book.cover, it.book.localCover, this.#prog(it.book), this.#finished(it.book)] : it.books.map(b => [b.id, b.cover, this.#prog(b)])]);
+      const sig = JSON.stringify([it.title, it.author, it.type === 'book' ? [it.book.cover, it.book.coverV, it.book.localCover, this.#prog(it.book), this.#finished(it.book)] : it.books.map(b => [b.id, b.cover, b.coverV, this.#prog(b)])]);
       let c = this.cards.get(it.key);
       if (!c || c.sig !== sig) {
         const el = this.#card(it);
@@ -159,7 +159,7 @@ export class Library {
       img.onerror = () => { img.remove(); gen(); };
       img.src = src; box.append(img);
     };
-    if (b.cover && b.cloud) useImg(api.coverUrl(b.id));
+    if (b.cover && b.cloud) useImg(api.coverUrl(b.id, b.coverV));
     else if (b.localCover) {
       if (this.urls.has(b.id)) useImg(this.urls.get(b.id));
       else { gen(); store.coverBlob(b.id).then(bl => { if (!bl) return; const u = URL.createObjectURL(bl); this.urls.set(b.id, u); box.classList.remove('gen'); box.replaceChildren(); box.removeAttribute('style'); useImg(u); }); }
@@ -379,11 +379,13 @@ export class Library {
     let done = 0;
     for (const f of ok) {
       try {
-        await api.upload(f, p => tray.set(`上传《${f.name.replace(/\.[^.]+$/, '').slice(0, 16)}》 ${Math.round(p * 100)}%`, (done + p) / ok.length));
+        const r = await api.upload(f, p => tray.set(`上传《${f.name.replace(/\.[^.]+$/, '').slice(0, 16)}》 ${Math.round(p * 100)}%`, (done + p) / ok.length));
         done++;
+        // 服务器没能取到封面（缺少工具、格式特殊）时，用浏览器解析出的封面补上
+        if (r.book && !r.book.cover) peekMeta(f).then(m => m.cover && api.postCover(r.book.id, m.cover)).catch(() => {});
       } catch (e) { toast(`${f.name} 上传失败：${e.message}`); }
     }
-    for (const f of big) { const meta = await peekMeta(f); await store.addLocal(f, meta); }
+    for (const f of big) { const meta = await peekMeta(f); const { id, existed } = await store.addLocal(f, meta); if (!existed && meta.cover) await store.saveCover(id, meta.cover); }
     await store.refresh();
     tray.done(`已存入云端 ${done} 本` + (big.length ? `；${big.length} 本超过 95 MB，先存在本机` : ''));
     this.render();

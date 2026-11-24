@@ -34,7 +34,8 @@ export function sanitize(html) {
   return DOMPurify.sanitize(html, {
     ADD_ATTR: ['epub:type', 'data-zb-anchor', 'xlink:href', 'viewBox', 'preserveAspectRatio'],
     FORBID_TAGS: ['style', 'link', 'script', 'iframe', 'form', 'input', 'button', 'textarea', 'select', 'object', 'embed', 'meta', 'title', 'base'],
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|blob|data):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    // filepos: / kindle:pos: 是 MOBI 与 AZW3（KF8）的书内链接，由 foliate 的 resolveHref 解析；不放行时目录页、注释链接全部失效
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|blob|data|filepos):|kindle:pos:|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
   });
 }
 
@@ -269,6 +270,23 @@ function textOffsetOf(root, el) {
   return off;
 }
 
+// 没有可用的封面声明时，取前两页里的第一张图（EPUB 的「首页」）
+async function firstPageImage(fb) {
+  if (typeof fb.loadBlob !== 'function') return null;
+  for (const s of fb.sections.filter(s => s.linear !== 'no').slice(0, 2)) {
+    try {
+      const doc = await s.createDocument();
+      const el = doc.querySelector('img[src], image');
+      const src = el?.getAttribute('src') || el?.getAttribute('xlink:href') || el?.getAttributeNS?.('http://www.w3.org/1999/xlink', 'href') || el?.getAttribute('href');
+      if (!src || /^(data|https?|blob):/i.test(src)) continue;
+      const path = s.resolveHref ? s.resolveHref(src) : src;
+      const blob = await fb.loadBlob(path);
+      if (blob?.size > 200) return blob;
+    } catch {}
+  }
+  return null;
+}
+
 async function foliateToBook(file) {
   const fb = await makeFoliate(file);
   const md = fb.metadata || {};
@@ -317,7 +335,13 @@ async function foliateToBook(file) {
         return { s: r.index, offset: textOffsetOf(raw.body || raw.documentElement, el), text: el.textContent?.trim().slice(0, 1200) };
       } catch { return null; }
     },
-    getCover: async () => { try { return await fb.getCover?.(); } catch { return null; } },
+    getCover: async () => {
+      try {
+        const c = await fb.getCover?.();
+        if (c && (!c.type || c.type.startsWith('image/'))) return c; // MOBI 的封面 Blob 没有 type
+        return await firstPageImage(fb);
+      } catch { return null; }
+    },
     destroy() { try { fb.destroy?.(); } catch {} },
   };
 }
@@ -359,13 +383,21 @@ export async function openFlowBook(blob, { name = '', format, title, author } = 
 export async function peekMeta(file) {
   const format = formatOf(file.name);
   const base = metaFromName(file.name);
-  if (['epub', 'mobi', 'fb2'].includes(format)) {
+  if (['epub', 'mobi', 'fb2', 'cbz'].includes(format)) {
     try {
       const b = await foliateToBook(file);
       const cover = await b.getCover();
       const r = { format, title: b.title || base.title, author: b.author || base.author, cover };
       b.destroy(); return r;
     } catch {}
+  }
+  if (format === 'pdf') { // 首页当封面
+    let pdf;
+    try {
+      const { PdfDoc } = await import('./pdfdoc.js');
+      pdf = await PdfDoc.open({ data: new Uint8Array(await file.arrayBuffer()) });
+      return { format, ...base, cover: await pdf.coverBlob() };
+    } catch {} finally { pdf?.destroy(); }
   }
   return { format, ...base };
 }

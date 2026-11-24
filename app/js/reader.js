@@ -72,6 +72,7 @@ export class Reader {
       let pdf = reuse;
       if (!pdf && book.local) { const blob = await store.localFile(book.id); if (blob) pdf = await PdfDoc.open({ data: new Uint8Array(await blob.arrayBuffer()) }); }
       if (!pdf) pdf = await PdfDoc.open({ url: api.fileUrl(book.id) }, { onProgress: progress });
+      if (!book.cover && !book.localCover) pdf.coverBlob().then(c => c && store.saveCover(book.id, c).then(() => store.emit('books'))).catch(() => {});
       if (!store.pref(book.id).reflow) return pdf;
       const fb = await pdfToBook(pdf, book, f => progress(f, '重排'));
       if (fb.sections.reduce((a, x) => a + x.size, 0) < pdf.n * 20) { // 几乎没有文字：其实是扫描版
