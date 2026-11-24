@@ -39,13 +39,24 @@ const api = {
   remove: id => api.req('book/' + id, { method: 'DELETE' }),
   postCover: (id, blob) => fetch('api/cover/' + id, { method: 'POST', body: blob }).catch(() => {}),
   fileUrl: id => new URL('api/file/' + id, location.href).href,
-  coverUrl: id => 'api/cover/' + id,
-  upload(file, onProgress) {
+  coverUrl: (id, v) => 'api/cover/' + id + (v ? '?v=' + v : ''), // v 随封面文件变化，换封面后不吃浏览器旧缓存
+  // 断线或服务器出错时自动重传一次；服务器按内容去重，重传不会多出一份
+  async upload(file, onProgress, tries = 2) {
+    for (let i = 1; ; i++) {
+      try { return await api.uploadOnce(file, onProgress); }
+      catch (e) { if (i >= tries || (e.status && e.status < 500)) throw e; await new Promise(r => setTimeout(r, 1500)); }
+    }
+  },
+  uploadOnce(file, onProgress) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
       x.open('PUT', 'api/upload?name=' + encodeURIComponent(file.name));
       x.upload.onprogress = e => e.lengthComputable && onProgress?.(e.loaded / e.total);
-      x.onload = () => { try { const j = JSON.parse(x.responseText); x.status < 300 ? resolve(j) : reject(new Error(j.error || x.statusText)); } catch (e) { reject(e); } };
+      x.onload = () => {
+        let j = {}; try { j = JSON.parse(x.responseText); } catch {}
+        if (x.status >= 200 && x.status < 300 && j.ok) resolve(j);
+        else reject(Object.assign(new Error(j.error || `服务器返回 ${x.status}`), { status: x.status }));
+      };
       x.onerror = () => reject(new Error('网络中断'));
       x.send(file);
     });

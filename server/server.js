@@ -132,14 +132,28 @@ async function catalog() {
 }
 const findBook = async id => (await catalog()).books.find(b => b.id === id);
 
-let building = null;
+let building = null, queued = null;
 function rebuildCatalog() {
-  if (building) return building;
-  building = new Promise(resolve => {
-    const p = spawn(process.execPath, [path.join(ROOT, 'build-catalog.mjs')], { cwd: ROOT, env: { ...process.env, BOOKS_DIR: BOOKS, DATA_DIR: DATA }, stdio: 'inherit' });
-    p.on('close', code => { building = null; catalogCache = null; resolve(code); });
-  });
-  return building;
+  if (!building) {
+    building = new Promise(resolve => {
+      const p = spawn(process.execPath, [path.join(ROOT, 'build-catalog.mjs')], { cwd: ROOT, env: { ...process.env, BOOKS_DIR: BOOKS, DATA_DIR: DATA }, stdio: 'inherit' });
+      p.on('close', code => { building = null; catalogCache = null; resolve(code); });
+    });
+    return building;
+  }
+  // 正在扫描时又有新文件落盘：等这一轮结束再扫一轮，保证新文件被收录
+  return queued ||= building.then(() => { queued = null; return rebuildCatalog(); });
+}
+
+// 与 build-catalog.mjs 的 contentId 一致：大小 + 前 256 KiB 的 SHA-1
+async function contentId(file) {
+  const fh = await fsp.open(file, 'r');
+  try {
+    const { size } = await fh.stat();
+    const buf = Buffer.alloc(Math.min(size, 262144));
+    await fh.read(buf, 0, buf.length, 0);
+    return crypto.createHash('sha1').update(String(size)).update(buf).digest('hex').slice(0, 16);
+  } finally { await fh.close(); }
 }
 
 // ---------- 进度同步 ----------
@@ -234,6 +248,7 @@ async function api(req, res, route, url) {
       const body = await readBody(req, 3 * 1024 * 1024);
       if (body.length < 200) return json(res, 400, { error: 'bad image' });
       await fsp.writeFile(file, body);
+      rebuildCatalog(); // 让书目里的 cover 标记跟上，其他设备也能看到
       return json(res, 200, { ok: true });
     }
     return serveFile(req, res, file, { cache: 'private, max-age=86400' });
@@ -266,16 +281,30 @@ async function api(req, res, route, url) {
     const ext = path.extname(fname).slice(1).toLowerCase();
     if (!fname || !BOOK_EXT.has(ext)) return json(res, 400, { error: '不支持的格式' });
     await fsp.mkdir(UPLOAD_DIR, { recursive: true });
-    let target = path.join(UPLOAD_DIR, fname);
-    for (let i = 2; fs.existsSync(target); i++) target = path.join(UPLOAD_DIR, fname.replace(/(\.[^.]+)$/, `（${i}）$1`));
-    const tmp = target + '.part';
-    const out = fs.createWriteStream(tmp);
+    // 每个请求写自己的临时文件（点开头，书目扫描会跳过）。同一本书可能被并发地传两次（浏览器或 CDN 断线重发），
+    // 共用一个 .part 时，先断开的那次会把另一次正在写的文件删掉，导致 rename ENOENT。
+    const tmp = path.join(UPLOAD_DIR, `.${crypto.randomUUID()}.part`);
+    const out = fs.createWriteStream(tmp, { flags: 'wx' });
     let n = 0;
     try {
       for await (const c of req) { n += c.length; if (n > UPLOAD_LIMIT) throw Object.assign(new Error('文件太大'), { code: 413 }); if (!out.write(c)) await new Promise(r => out.once('drain', r)); }
       await new Promise((r, j) => out.end(e => e ? j(e) : r()));
-      await fsp.rename(tmp, target);
     } catch (e) { out.destroy(); await fsp.rm(tmp, { force: true }); throw e; }
+    let target;
+    try {
+      const id = await contentId(tmp);
+      // 书库里已有同一本（重传、重复导入）：直接返回那本，不再多存一份
+      const have = (await catalog()).books.find(b => b.id === id && fs.existsSync(path.join(BOOKS, b.path)));
+      if (have) return json(res, 200, { ok: true, book: have, existed: true });
+      for (let i = 1; ; i++) {
+        target = path.join(UPLOAD_DIR, i === 1 ? fname : fname.replace(/(\.[^.]+)?$/, `（${i}）$1`));
+        try { await fsp.link(tmp, target); break; } // link 在目标已存在时报 EEXIST，不会覆盖并发写入的同名文件
+        catch (e) {
+          if (e.code !== 'EEXIST') throw e;
+          if (await contentId(target).catch(() => null) === id) break; // 同名且同内容：并发的另一次已经落盘
+        }
+      }
+    } finally { await fsp.rm(tmp, { force: true }); }
     await rebuildCatalog();
     const rel = path.relative(BOOKS, target).split(path.sep).join('/');
     const book = (await catalog()).books.find(b => b.path === rel);

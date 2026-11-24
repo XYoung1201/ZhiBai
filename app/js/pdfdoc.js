@@ -245,6 +245,11 @@ export class PdfDoc {
     this.#fullBox(tl, i, css); // pdf.js 会改写容器尺寸，按我们的几何复位
     if (this.hit?.page === i) markHit(tl, this.hit.q);
   }
+  // 首页渲染成 JPEG，当书架封面
+  async coverBlob(w = 320) {
+    const c = await this.thumb(0, w);
+    return new Promise(r => c.toBlob(r, 'image/jpeg', .84));
+  }
   async thumb(i, w = 132) {
     if (this.thumbs.has(i)) return this.thumbs.get(i);
     const p = (async () => {
