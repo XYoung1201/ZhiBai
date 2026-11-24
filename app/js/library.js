@@ -2,6 +2,7 @@
 import { h, $, $$, icon, clamp, debounce, toast, fmtSize, fmtDuration, pct, relTime, fuzzy, markRanges, strHash, pickFiles, onLongPress, isTouch, esc, sleep } from './util.js';
 import { store, api } from './store.js';
 import { ACCEPT, formatOf, peekMeta } from './formats.js';
+import { md5Blob } from './md5.js';
 import { toggleNight } from './reader.js';
 import { THEMES, effectiveTheme } from './theme.js';
 
@@ -115,7 +116,7 @@ export class Library {
     const keep = new Set();
     for (const it of items) {
       keep.add(it.key);
-      const sig = JSON.stringify([it.title, it.author, it.type === 'book' ? [it.book.cover, it.book.coverV, it.book.localCover, this.#prog(it.book), this.#finished(it.book)] : it.books.map(b => [b.id, b.cover, b.coverV, this.#prog(b)])]);
+      const sig = JSON.stringify([it.title, it.author, it.type === 'book' ? [it.book.cover, it.book.coverV, it.book.localCover, this.#prog(it.book), this.#finished(it.book)] : it.books.map(b => [b.id, b.title, b.cover, b.coverV, this.#prog(b)])]);
       let c = this.cards.get(it.key);
       if (!c || c.sig !== sig) {
         const el = this.#card(it);
@@ -271,9 +272,19 @@ export class Library {
 
   // ---------- 详情 ----------
   showInfo(b) {
+    b = store.books.get(b.id) || b; // 书卡闭包里的可能是刷新书目前的旧对象，改名要改在当前这份上
     const st = store.state(b.id), p = st.progress?.pct || 0, time = store.readingTime(b.id);
     const cats = [...new Set([...store.categories, ...this.#books().map(x => x.category).filter(Boolean)])];
-    const title = h('input', { class: 'inline-edit', value: b.title, 'aria-label': '书名' });
+    const title = h('input', { class: 'inline-edit', value: b.title, placeholder: '书名', enterkeyhint: 'done', 'aria-label': '书名' });
+    const coverBox = h('div', { class: 'info-cover' }, this.cover(b, 'lg'));
+    // 没有封面图的书，封面上印的是书名：边改边重画
+    const redraw = t => { if (coverBox.querySelector('.cover.gen')) coverBox.replaceChildren(this.cover({ ...b, title: t || b.title }, 'lg')); };
+    title.addEventListener('input', () => redraw(title.value.trim()));
+    title.addEventListener('keydown', e => {
+      if (e.key === 'Enter') title.blur();
+      if (e.key === 'Escape') { e.stopPropagation(); title.value = b.title; redraw(b.title); title.blur(); }
+    });
+    const titleRow = h('div', { class: 'title-row' }, title, h('button', { class: 'ib sm', title: '修改书名', 'aria-label': '修改书名', html: icon('edit'), onclick: () => { title.focus(); title.select(); } }));
     const author = h('input', { class: 'inline-edit sm', value: b.author || '', placeholder: '作者', 'aria-label': '作者' });
     const cat = h('select', { class: 'select', 'aria-label': '分类' }, h('option', { value: '' }, '未分类'), cats.map(c => h('option', { value: c, selected: c === b.category }, c)), h('option', { value: '__new' }, '新分类…'));
     const save = async () => {
@@ -283,8 +294,9 @@ export class Library {
       if (title.value.trim() && title.value.trim() !== b.title) patch.title = title.value.trim();
       if (author.value.trim() !== (b.author || '')) patch.author = author.value.trim();
       if (category !== (b.category || '')) patch.category = category;
-      if (Object.keys(patch).length) { await store.updateMeta(b.id, patch); toast('已更新'); }
+      if (Object.keys(patch).length) { await store.updateMeta(b.id, patch); redraw(b.title); toast(patch.title ? '书名已改' : '已更新'); }
     };
+    const summary = this.#summary(b);
     title.onchange = save; author.onchange = save; cat.onchange = save;
     const facts = [
       ['格式', FORMAT_NAME[b.format] || b.format], ['大小', fmtSize(b.size || 0)], b.pages ? ['页数', b.pages + ' 页'] : null,
@@ -303,9 +315,27 @@ export class Library {
       b.cloud && store.authed ? h('button', { class: 'btn ghost danger', html: icon('trash') + '<span>移出云端书库</span>', onclick: async () => { if (!confirm(`将《${b.title}》移出云端书库？\n文件会移到服务器的回收目录，可找回。`)) return; try { await api.remove(b.id); await store.refresh(); this.closeSheet(); toast('已移出'); } catch (e) { toast('操作失败：' + e.message); } } }) : null,
     );
     this.openSheet(h('div', { class: 'info' },
-      h('div', { class: 'info-top' }, h('div', { class: 'info-cover' }, this.cover(b, 'lg')), h('div', { class: 'info-main' }, title, author, h('label', { class: 'cat-pick' }, h('span', null, '分类'), cat))),
+      h('div', { class: 'info-top' }, coverBox, h('div', { class: 'info-main' }, titleRow, author, h('label', { class: 'cat-pick' }, h('span', null, '分类'), cat))),
+      summary,
       h('dl', { class: 'facts' }, facts.map(([k, v]) => [h('dt', null, k), h('dd', null, v)])),
       acts), 'info-sheet');
+  }
+
+  // 摘要：书中第一段正文。书目里没有时（仅在本机的书、服务器读不了的格式）在浏览器里提取，并记下来
+  #summary(b) {
+    const text = h('p', { class: 'summary-text' });
+    const box = h('section', { class: 'summary', hidden: true }, h('h4', null, '摘要'), text);
+    const show = (t, muted) => { box.hidden = false; text.textContent = t; text.classList.toggle('muted', !!muted); };
+    const NONE = '书里没有找到可作摘要的正文段落（扫描版通常如此）。';
+    if (b.summary) show(b.summary);
+    else if (b.summary === '') show(NONE, true);
+    else if (b.local || b.format === 'pdf' || (b.size || 0) < 60 * 1024 * 1024) {
+      show('正在从书中提取第一段正文…', true);
+      import('./summary.js').then(m => m.extractSummary(b))
+        .then(t => { show(t || NONE, !t); return store.updateMeta(b.id, { summary: t || '' }); })
+        .catch(() => { box.hidden = true; });
+    }
+    return box;
   }
 
   // ---------- 通用抽屉 ----------
@@ -376,10 +406,16 @@ export class Library {
     const big = files.filter(f => f.size > 95 * 1024 * 1024);
     const ok = files.filter(f => f.size <= 95 * 1024 * 1024);
     const tray = this.#tray(`上传到云端 0 / ${ok.length}`);
-    let done = 0;
-    for (const f of ok) {
+    let done = 0, dup = 0;
+    for (const [i, f] of ok.entries()) {
+      const short = f.name.replace(/\.[^.]+$/, '').slice(0, 16);
       try {
-        const r = await api.upload(f, p => tray.set(`上传《${f.name.replace(/\.[^.]+$/, '').slice(0, 16)}》 ${Math.round(p * 100)}%`, (done + p) / ok.length));
+        // 先算整个文件的 MD5 问服务器：已有同一份就不再上传
+        const md5 = await md5Blob(f, p => tray.set(`核对《${short}》 ${Math.round(p * 100)}%`, (i + p * .1) / ok.length));
+        const have = await api.exists(md5).catch(() => ({}));
+        if (have.book) { dup++; continue; }
+        const r = await api.upload(f, p => tray.set(`上传《${short}》 ${Math.round(p * 100)}%`, (i + .1 + p * .9) / ok.length), md5);
+        if (r.existed) { dup++; continue; }
         done++;
         // 服务器没能取到封面（缺少工具、格式特殊）时，用浏览器解析出的封面补上
         if (r.book && !r.book.cover) peekMeta(f).then(m => m.cover && api.postCover(r.book.id, m.cover)).catch(() => {});
@@ -387,7 +423,7 @@ export class Library {
     }
     for (const f of big) { const meta = await peekMeta(f); const { id, existed } = await store.addLocal(f, meta); if (!existed && meta.cover) await store.saveCover(id, meta.cover); }
     await store.refresh();
-    tray.done(`已存入云端 ${done} 本` + (big.length ? `；${big.length} 本超过 95 MB，先存在本机` : ''));
+    tray.done([done || !dup ? `已存入云端 ${done} 本` : '', dup ? `${dup} 本书库里已有（文件 MD5 相同），没有重复上传` : '', big.length ? `${big.length} 本超过 95 MB，先存在本机` : ''].filter(Boolean).join('；'));
     this.render();
   }
   #tray(text) {
