@@ -464,6 +464,8 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .flow-content hr { border: 0; margin: 1.6em 0; text-align: center; height: auto; }
 .flow-content hr::after { content: '◇'; font-size: .8em; opacity: .4; letter-spacing: 1em; }
 .flow-content aside[epub\:type~="footnote"], .flow-content aside[role="doc-footnote"] { font-size: .85em; color: var(--page-ink-2); }
+.flow-content :is(strong, b) { font-weight: 700; color: var(--ink); }
+.flow-content mark:not([class]) { color: inherit; background: linear-gradient(transparent 55%, var(--accent-soft) 55%); border-radius: 0; }
 .flow-content mark.hl { color: inherit; background: linear-gradient(transparent 58%, var(--hl-y) 58%, var(--hl-y) 94%, transparent 94%); border-radius: 0; cursor: pointer; }
 .flow-content mark.hl[data-c="g"] { --hl-y: var(--hl-g); }
 .flow-content mark.hl[data-c="b"] { --hl-y: var(--hl-b); }

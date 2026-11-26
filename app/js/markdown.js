@@ -26,6 +26,33 @@ function mathExtension(name, level, opener, pattern, display) {
   };
 }
 
+// 中文友好的行内格式。CommonMark 的「左右侧定界」规则在中文标点旁会失效，例如「**加粗：**后文」「中文**“引号”**中文」
+// 都不会加粗。这里放宽为：成对标记之间的内容首尾不是空白即可。下划线写法只在内容含中日韩文字时放宽，避免误伤 snake_case。
+// 内容里的转义、行内代码与行内公式整体跳过，不会被拆开。
+const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef\u3000-\u303f]/;
+const BODY = '((?:\\\\[\\s\\S]|`[^`\\n]+`|\\$[^$\\n]+\\$|[\\s\\S])+?)';
+const pair = (open, close = open, extra = '') => new RegExp('^' + open + '(?!\\s)' + BODY + '(?<![\\s\\\\' + extra + '])' + close);
+const EMPH = [
+  { type: 'strong', re: pair('\\*\\*', '\\*\\*(?!\\*)') },
+  { type: 'strong', re: pair('__', '__(?!_)'), cjk: true },
+  { type: 'del', re: pair('~~', '~~(?!~)') },
+  { type: 'mark', re: pair('==(?!=)', '==(?!=)') },
+  { type: 'em', re: pair('\\*(?![*\\s])', '\\*(?!\\*)', '*') },
+  { type: 'em', re: pair('_(?![_\\s])', '_(?!_)', '_'), cjk: true },
+];
+const emphasis = {
+  name: 'cjkEmphasis', level: 'inline',
+  start(src) { return src.search(/[*_~=]/); },
+  tokenizer(src) {
+    for (const { type, re, cjk } of EMPH) {
+      const m = re.exec(src);
+      if (!m || (cjk && !CJK.test(m[1]))) continue;
+      return { type, raw: m[0], text: m[1], tokens: this.lexer.inlineTokens(m[1]) };
+    }
+  },
+};
+const highlight = { name: 'mark', level: 'inline', renderer(token) { return '<mark>' + this.parser.parseInline(token.tokens) + '</mark>'; } };
+
 const markdown = new Marked({
   gfm: true,
   renderer: { checkbox({ checked }) { return checked ? '☑ ' : '☐ '; } },
@@ -33,6 +60,7 @@ const markdown = new Marked({
     mathExtension('blockMath', 'block', /(?:^|\n) {0,3}(?:\$\$|\\\[|\\begin\{(?:equation|align|alignat|gather|multline|eqnarray|flalign)\*?\})/, blockMath),
     mathExtension('displayMath', 'inline', /\$\$/, displayInline, true),
     mathExtension('inlineMath', 'inline', /\$|\\\(/, inlineMath),
+    emphasis, highlight,
   ],
 });
 

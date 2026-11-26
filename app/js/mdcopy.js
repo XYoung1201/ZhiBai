@@ -29,7 +29,8 @@ function convert(n, ctx) {
   if (tag === 'MATH' || tag === 'ANNOTATION' || tag === 'STYLE' || tag === 'SCRIPT') return '';
   const inner = () => children(n, ctx);
   switch (tag) {
-    case 'MARK': return n.classList.contains('zb-q') ? wrapInline(inner(), '==') : inner();
+    // 书里原有的 ==高亮==（没有 class）与笔记引文 zb-q 都还原成 ==…==；阅读器自己加的划线 hl、搜索命中 hit 不算
+    case 'MARK': return n.classList.contains('hl') || n.classList.contains('hit') ? inner() : wrapInline(inner(), '==');
     case 'B': case 'STRONG': return wrapInline(inner(), '**');
     case 'I': case 'EM': return wrapInline(inner(), '*');
     case 'DEL': case 'S': return wrapInline(inner(), '~~');
