@@ -57,6 +57,9 @@ function renderMath(el, tex, displayMode) {
 
 const isRemote = u => /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(u);
 
+// 只做 Markdown → HTML（公式先占位，不排版）；便于测试，也给需要原始 HTML 的地方用
+export const markdownToHtml = source => markdown.parse(source);
+
 // resolveImg(src) → { url, path } | null：压缩包里的配图换成 blob 地址
 export function markdownToBook(source, meta, resolveImg) {
   return htmlToBook(markdown.parse(source), meta, body => {

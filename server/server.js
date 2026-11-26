@@ -22,7 +22,10 @@ const STATE = path.join(DATA, 'state.json');
 const KEYFILE = path.join(DATA, 'key.txt');
 const TRASH = path.join(DATA, 'trash');
 const UPLOAD_DIR = path.join(BOOKS, '上传');
-const UPLOAD_LIMIT = 512 * 1024 * 1024;
+const UPLOAD_LIMIT = 512 * 1024 * 1024;   // 单次 PUT 上传
+const CHUNKED_LIMIT = 4 * 1024 ** 3;       // 分片上传的整本上限
+const CHUNK_MAX = 32 * 1024 * 1024;        // 单个分片上限（Cloudflare 单请求 100 MB）
+const PART_TTL = 24 * 3600e3;              // 未完成的分片上传保留一天
 const BOOK_EXT = new Set(['pdf', 'epub', 'mobi', 'azw', 'azw3', 'fb2', 'fbz', 'txt', 'md', 'markdown', 'html', 'htm', 'xhtml', 'docx', 'doc', 'cbz', 'zip']);
 
 const MIME = {
@@ -152,6 +155,49 @@ const md5File = file => new Promise((resolve, reject) => {
 });
 const byMd5 = async md5 => (await catalog()).books.find(b => b.md5 === md5 && fs.existsSync(path.join(BOOKS, b.path)));
 
+// 上传文件名：只留文件名本身、去掉非法字符，扩展名须是书籍格式
+function cleanName(raw) {
+  const fname = path.basename(String(raw || '').normalize('NFC')).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 180);
+  return fname && BOOK_EXT.has(path.extname(fname).slice(1).toLowerCase()) ? fname : '';
+}
+async function drain(req) { for await (const _ of req); }
+
+// 临时文件收齐后入库：校验 MD5、按 MD5 去重、避开同名文件，最后重建书目。tmp 总会被删掉。
+async function finishUpload(tmp, fname, md5, want) {
+  let target;
+  try {
+    if (want && want.toLowerCase() !== md5) return { code: 409, body: { error: '文件在传输中损坏，请重试' } };
+    // 书库里已有 MD5 相同的书（重传、换了文件名再传）：直接返回那本，不再多存一份
+    const have = await byMd5(md5);
+    if (have) return { code: 200, body: { ok: true, book: have, existed: true } };
+    for (let i = 1; ; i++) {
+      target = path.join(UPLOAD_DIR, i === 1 ? fname : fname.replace(/(\.[^.]+)?$/, `（${i}）$1`));
+      try { await fsp.link(tmp, target); break; } // link 在目标已存在时报 EEXIST，不会覆盖并发写入的同名文件
+      catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        if (await md5File(target).catch(() => null) === md5) break; // 同名且同内容：并发的另一次已经落盘
+      }
+    }
+  } finally { await fsp.rm(tmp, { force: true }); }
+  await rebuildCatalog();
+  const rel = path.relative(BOOKS, target).split(path.sep).join('/');
+  const book = (await catalog()).books.find(b => b.path === rel);
+  return { code: 200, body: { ok: true, book } };
+}
+
+// 清理放弃了的上传临时文件
+async function sweepParts() {
+  const names = await fsp.readdir(UPLOAD_DIR).catch(() => []);
+  for (const n of names) {
+    if (!/^\..+\.part$/.test(n)) continue;
+    const f = path.join(UPLOAD_DIR, n);
+    const st = await fsp.stat(f).catch(() => null);
+    if (st && Date.now() - st.mtimeMs > PART_TTL) await fsp.rm(f, { force: true });
+  }
+}
+setInterval(sweepParts, 3600e3).unref();
+sweepParts();
+
 // ---------- 进度同步 ----------
 // 结构：{ books: { [id]: { progress:{...,t}, marks:{items,t}, notes:{items,t}, stats:{[device]:{[day]:sec}} } }, settings:{..., t} }
 let stateCache = null, stateWrite = Promise.resolve();
@@ -280,10 +326,8 @@ async function api(req, res, route, url) {
   }
 
   if (name === 'upload' && method === 'PUT') {
-    let fname = (url.searchParams.get('name') || '').normalize('NFC');
-    fname = path.basename(fname).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 180);
-    const ext = path.extname(fname).slice(1).toLowerCase();
-    if (!fname || !BOOK_EXT.has(ext)) return json(res, 400, { error: '不支持的格式' });
+    const fname = cleanName(url.searchParams.get('name'));
+    if (!fname) return json(res, 400, { error: '不支持的格式' });
     await fsp.mkdir(UPLOAD_DIR, { recursive: true });
     // 每个请求写自己的临时文件（点开头，书目扫描会跳过）。同一本书可能被并发地传两次（浏览器或 CDN 断线重发），
     // 共用一个 .part 时，先断开的那次会把另一次正在写的文件删掉，导致 rename ENOENT。
@@ -295,27 +339,36 @@ async function api(req, res, route, url) {
       for await (const c of req) { n += c.length; if (n > UPLOAD_LIMIT) throw Object.assign(new Error('文件太大'), { code: 413 }); hash.update(c); if (!out.write(c)) await new Promise(r => out.once('drain', r)); }
       await new Promise((r, j) => out.end(e => e ? j(e) : r()));
     } catch (e) { out.destroy(); await fsp.rm(tmp, { force: true }); throw e; }
-    const md5 = hash.digest('hex');
-    const want = url.searchParams.get('md5');
-    if (want && want !== md5) { await fsp.rm(tmp, { force: true }); return json(res, 409, { error: '文件在传输中损坏，请重试' }); }
-    let target;
-    try {
-      // 书库里已有 MD5 相同的书（重传、换了文件名再传）：直接返回那本，不再多存一份
-      const have = await byMd5(md5);
-      if (have) return json(res, 200, { ok: true, book: have, existed: true });
-      for (let i = 1; ; i++) {
-        target = path.join(UPLOAD_DIR, i === 1 ? fname : fname.replace(/(\.[^.]+)?$/, `（${i}）$1`));
-        try { await fsp.link(tmp, target); break; } // link 在目标已存在时报 EEXIST，不会覆盖并发写入的同名文件
-        catch (e) {
-          if (e.code !== 'EEXIST') throw e;
-          if (await md5File(target).catch(() => null) === md5) break; // 同名且同内容：并发的另一次已经落盘
-        }
-      }
-    } finally { await fsp.rm(tmp, { force: true }); }
-    await rebuildCatalog();
-    const rel = path.relative(BOOKS, target).split(path.sep).join('/');
-    const book = (await catalog()).books.find(b => b.path === rel);
-    return json(res, 200, { ok: true, book });
+    const r = await finishUpload(tmp, fname, hash.digest('hex'), url.searchParams.get('md5'));
+    return json(res, r.code, r.body);
+  }
+
+  // 分片上传：大文件（超过 Cloudflare 单请求上限）切成小块依次 PUT，最后合并并按 MD5 去重
+  //   PUT  api/chunk/<uuid>?offset=N   追加一块；offset 与已收字节数不符时回 409 与 { size }，客户端据此续传
+  //   POST api/chunk/<uuid>?name=&md5=  收齐后合并入库
+  if (name === 'chunk' && arg) {
+    if (!/^[0-9a-f-]{36}$/.test(arg)) return json(res, 400, { error: 'bad id' });
+    await fsp.mkdir(UPLOAD_DIR, { recursive: true });
+    const tmp = path.join(UPLOAD_DIR, `.${arg}.chunked.part`);
+    const size = (await fsp.stat(tmp).catch(() => null))?.size ?? 0;
+    if (method === 'PUT') {
+      const offset = +url.searchParams.get('offset');
+      if (!Number.isSafeInteger(offset) || offset !== size) { await drain(req); return json(res, 409, { error: 'offset mismatch', size }); }
+      const body = await readBody(req, CHUNK_MAX);
+      if (size + body.length > CHUNKED_LIMIT) { await fsp.rm(tmp, { force: true }); return json(res, 413, { error: '文件太大' }); }
+      await fsp.appendFile(tmp, body);
+      return json(res, 200, { ok: true, size: size + body.length });
+    }
+    if (method === 'POST') {
+      const fname = cleanName(url.searchParams.get('name'));
+      if (!fname) { await fsp.rm(tmp, { force: true }); return json(res, 400, { error: '不支持的格式' }); }
+      if (!size) return json(res, 404, { error: '没有收到分片' });
+      const want = +url.searchParams.get('size');
+      if (want && want !== size) return json(res, 409, { error: '分片不完整', size });
+      const r = await finishUpload(tmp, fname, await md5File(tmp), url.searchParams.get('md5'));
+      return json(res, r.code, r.body);
+    }
+    if (method === 'DELETE') { await fsp.rm(tmp, { force: true }); return json(res, 200, { ok: true }); }
   }
 
   if (name === 'book' && arg && method === 'DELETE') {

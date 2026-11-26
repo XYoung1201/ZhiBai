@@ -7,8 +7,8 @@
 #   3. nginx -t 通过后 reload；失败则自动还原备份
 # 回滚：systemctl disable --now zhibai; cp /root/app.conf.bak.<时间> /etc/nginx/sites-enabled/app.conf; systemctl reload nginx
 set -euo pipefail
-SSH="/c/Program Files/Git/usr/bin/ssh.exe"; [ -x "$SSH" ] || SSH=ssh
-"$SSH" -o BatchMode=yes server 'bash -s' <<'REMOTE'
+. "$(dirname "$0")/remote.sh"
+"$SSH" -o BatchMode=yes "$ZHIBAI_HOST" 'bash -s' <<'REMOTE'
 set -e
 cat > /etc/systemd/system/zhibai.service <<'UNIT'
 [Unit]

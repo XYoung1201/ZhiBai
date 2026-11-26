@@ -5,16 +5,16 @@
 # 只增不删：服务器上已有的书（按路径与大小判断）不会重复上传
 set -euo pipefail
 SRC="${1:-$(dirname "$0")/../..}"
+. "$(dirname "$0")/remote.sh"
 cd "$SRC"
-SSH="/c/Program Files/Git/usr/bin/ssh.exe"; [ -x "$SSH" ] || SSH=ssh
 EXT='pdf|epub|mobi|azw|azw3|fb2|fbz|txt|md|markdown|html|htm|docx|doc|cbz'
 # 远端现有文件清单（路径 + 大小）
-"$SSH" -o BatchMode=yes server 'cd /root/zhibai/books && find . -type f -printf "%p\t%s\n"' | sort > /tmp/zb-remote.txt
+"$SSH" -o BatchMode=yes "$ZHIBAI_HOST" "cd $ZHIBAI_DIR/books && find . -type f -printf '%p\t%s\n'" | sort > /tmp/zb-remote.txt
 find . -path ./_知白 -prune -o -path ./.claude -prune -o -type f -regextype posix-extended -iregex ".*\.($EXT)$" -printf "%p\t%s\n" | sort > /tmp/zb-local.txt
 comm -23 /tmp/zb-local.txt /tmp/zb-remote.txt | cut -f1 > /tmp/zb-new.txt
 N=$(wc -l < /tmp/zb-new.txt)
 if [ "$N" -eq 0 ]; then echo "书库已是最新"; else
   echo "上传 $N 个文件…"
-  tar -cf - -T /tmp/zb-new.txt | "$SSH" -o BatchMode=yes -o Compression=no server 'tar -xf - -C /root/zhibai/books'
+  tar -cf - -T /tmp/zb-new.txt | "$SSH" -o BatchMode=yes -o Compression=no "$ZHIBAI_HOST" "tar -xf - -C $ZHIBAI_DIR/books"
 fi
-"$SSH" -o BatchMode=yes server 'cd /root/zhibai && /root/.nvm/versions/node/v24.22.0/bin/node build-catalog.mjs | tail -1'
+"$SSH" -o BatchMode=yes "$ZHIBAI_HOST" "cd $ZHIBAI_DIR"' && NODE=$(command -v node || ls -1 /root/.nvm/versions/node/*/bin/node | sort -V | tail -n 1) && "$NODE" build-catalog.mjs | tail -1'

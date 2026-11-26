@@ -1,0 +1,12 @@
+{
+  "name": "zhibai",
+  "private": true,
+  "type": "module",
+  "description": "知白 · 书房：零依赖的自托管网页阅读器",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server/dev.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "for f in server/*.js server/*.mjs app/js/*.js app/sw.js; do node --check \"$f\" || exit 1; done"
+  }
+}

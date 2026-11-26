@@ -23,7 +23,7 @@ export function metaFromName(name) {
 
 // ---------- 清洗 ----------
 const KEEP_STYLE = new Set(['text-align', 'font-style', 'font-weight', 'text-decoration', 'vertical-align', 'font-variant']);
-DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+DOMPurify.addHook?.('uponSanitizeAttribute', (node, data) => {
   if (data.attrName === 'style') {
     const keep = data.attrValue.split(';').map(d => d.split(':').map(s => s?.trim().toLowerCase())).filter(([p, v]) => v && KEEP_STYLE.has(p) && !/url|expression/.test(v));
     data.attrValue = keep.map(([p, v]) => `${p}:${v}`).join(';');
