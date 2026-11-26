@@ -23,6 +23,10 @@ export const DEFAULTS = {
   view: 'grid',
 };
 
+const CHUNK = 8 * 1024 * 1024;
+const CHUNKED_OVER = 64 * 1024 * 1024;
+const uid32 = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b, i) => ([4, 6, 8, 10].includes(i) ? '-' : '') + b.toString(16).padStart(2, '0')).join('');
+
 const api = {
   async req(path, opts = {}) {
     const r = await fetch('api/' + path, { credentials: 'same-origin', ...opts });
@@ -43,10 +47,32 @@ const api = {
   exists: md5 => api.req('exists?md5=' + md5), // 书库里是否已有这份文件（按整个文件的 MD5）
   // 断线、服务器出错或传输中损坏（MD5 对不上，409）时自动重传一次；服务器按 MD5 去重，重传不会多出一份
   async upload(file, onProgress, md5, tries = 2) {
+    // 大文件走分片：Cloudflare 单个请求不能超过 100 MB
+    if (file.size > CHUNKED_OVER) return api.uploadChunked(file, onProgress, md5);
     for (let i = 1; ; i++) {
       try { return await api.uploadOnce(file, onProgress, md5); }
       catch (e) { if (i >= tries || (e.status && e.status < 500 && e.status !== 409)) throw e; await new Promise(r => setTimeout(r, 1500)); }
     }
+  },
+  // 分片上传：每片 8 MB 依次追加，单片失败最多重试 4 次；服务器回报的已收字节数就是续传位置
+  async uploadChunked(file, onProgress, md5) {
+    const id = crypto.randomUUID?.() || uid32();
+    let offset = 0, fails = 0;
+    while (offset < file.size) {
+      const end = Math.min(file.size, offset + CHUNK);
+      try {
+        const r = await fetch(`api/chunk/${id}?offset=${offset}`, { method: 'PUT', credentials: 'same-origin', body: file.slice(offset, end) });
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 409 && Number.isFinite(j.size)) { offset = j.size; continue; }
+        if (!r.ok) throw Object.assign(new Error(j.error || `服务器返回 ${r.status}`), { status: r.status });
+        offset = j.size ?? end; fails = 0;
+        onProgress?.(offset / file.size);
+      } catch (e) {
+        if ((e.status && e.status < 500) || ++fails > 4) { fetch(`api/chunk/${id}`, { method: 'DELETE', credentials: 'same-origin' }).catch(() => {}); throw e; }
+        await new Promise(r => setTimeout(r, 1000 * fails));
+      }
+    }
+    return api.req(`chunk/${id}?name=${encodeURIComponent(file.name)}&size=${file.size}` + (md5 ? '&md5=' + md5 : ''), { method: 'POST' });
   },
   uploadOnce(file, onProgress, md5) {
     return new Promise((resolve, reject) => {

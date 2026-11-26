@@ -3,6 +3,7 @@ import { h, $, $$, icon, clamp, debounce, toast, fmtSize, fmtDuration, pct, relT
 import { store, api } from './store.js';
 import { ACCEPT, formatOf, peekMeta } from './formats.js';
 import { md5Blob } from './md5.js';
+import { fromClipboard, fromDataTransfer, textToFile } from './clipboard.js';
 import { toggleNight } from './reader.js';
 import { THEMES, effectiveTheme } from './theme.js';
 
@@ -403,28 +404,58 @@ export class Library {
     this.render();
   }
   async #upload(files) {
-    const big = files.filter(f => f.size > 95 * 1024 * 1024);
-    const ok = files.filter(f => f.size <= 95 * 1024 * 1024);
-    const tray = this.#tray(`上传到云端 0 / ${ok.length}`);
+    const tray = this.#tray(`上传到云端 0 / ${files.length}`);
     let done = 0, dup = 0;
-    for (const [i, f] of ok.entries()) {
+    for (const [i, f] of files.entries()) {
       const short = f.name.replace(/\.[^.]+$/, '').slice(0, 16);
       try {
         // 先算整个文件的 MD5 问服务器：已有同一份就不再上传
-        const md5 = await md5Blob(f, p => tray.set(`核对《${short}》 ${Math.round(p * 100)}%`, (i + p * .1) / ok.length));
+        const md5 = await md5Blob(f, p => tray.set(`核对《${short}》 ${Math.round(p * 100)}%`, (i + p * .1) / files.length));
         const have = await api.exists(md5).catch(() => ({}));
         if (have.book) { dup++; continue; }
-        const r = await api.upload(f, p => tray.set(`上传《${short}》 ${Math.round(p * 100)}%`, (i + .1 + p * .9) / ok.length), md5);
+        // 超过 64 MB 的文件自动分片上传，不再受单个请求大小的限制
+        const r = await api.upload(f, p => tray.set(`上传《${short}》 ${Math.round(p * 100)}%`, (i + .1 + p * .9) / files.length), md5);
         if (r.existed) { dup++; continue; }
         done++;
         // 服务器没能取到封面（缺少工具、格式特殊）时，用浏览器解析出的封面补上
         if (r.book && !r.book.cover) peekMeta(f).then(m => m.cover && api.postCover(r.book.id, m.cover)).catch(() => {});
       } catch (e) { toast(`${f.name} 上传失败：${e.message}`); }
     }
-    for (const f of big) { const meta = await peekMeta(f); const { id, existed } = await store.addLocal(f, meta); if (!existed && meta.cover) await store.saveCover(id, meta.cover); }
     await store.refresh();
-    tray.done([done || !dup ? `已存入云端 ${done} 本` : '', dup ? `${dup} 本书库里已有（文件 MD5 相同），没有重复上传` : '', big.length ? `${big.length} 本超过 95 MB，先存在本机` : ''].filter(Boolean).join('；'));
+    tray.done([done || !dup ? `已存入云端 ${done} 本` : '', dup ? `${dup} 本书库里已有（文件 MD5 相同），没有重复上传` : ''].filter(Boolean).join('；'));
     this.render();
+  }
+  // ---------- 从粘贴板导入 ----------
+  // 先试异步剪贴板 API（需授权；Chrome 读不到从文件管理器复制的文件）；读不到可用内容时弹出粘贴框，手动粘贴总能拿到文件与文字
+  async pasteImport() {
+    try {
+      const r = await fromClipboard();
+      if (r.files.length) return this.#importPasted(r);
+    } catch (e) { console.info('clipboard.read', e?.message); }
+    this.#pasteSheet();
+  }
+  #importPasted({ files, images, other }) {
+    if (files.length) {
+      if (files.length === 1 && files[0].type === 'text/markdown') toast(`粘贴板里是文字，按 Markdown 导入为《${files[0].name.replace(/\.md$/, '')}》`);
+      return this.import(files);
+    }
+    toast(images ? '粘贴板里是图片，不是书籍文件' : other ? '粘贴板里的内容不是可识别的书籍格式' : '粘贴板是空的');
+  }
+  #pasteSheet() {
+    const ta = h('textarea', { class: 'paste-input', placeholder: '在这里粘贴（Ctrl+V / ⌘V，手机上长按选「粘贴」）\n\n· 复制的 PDF、EPUB、MOBI 等文件会按原格式导入\n· 文字会按 Markdown 导入，可带 $公式$', rows: 8 });
+    const go = () => { const t = ta.value; if (!t.trim()) { ta.focus(); return; } this.closeSheet(); this.import([textToFile(t)]); };
+    ta.addEventListener('paste', e => {
+      const dt = e.clipboardData;
+      if (!dt?.files?.length) return; // 文字照常粘进框里，确认后再导入
+      e.preventDefault();
+      fromDataTransfer(dt).then(r => { this.closeSheet(); this.#importPasted(r); });
+    });
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) go(); });
+    this.openSheet(h('div', { class: 'login paste' },
+      h('div', { class: 'login-mark', html: icon('paste') }), h('h3', null, '从粘贴板导入'),
+      h('p', { class: 'sub' }, '浏览器没有允许直接读取粘贴板，请把内容粘贴到下面。'),
+      ta, h('button', { class: 'btn wide', onclick: go }, '按 Markdown 导入')), 'narrow');
+    setTimeout(() => ta.focus(), 120);
   }
   #tray(text) {
     const el = this.ui.tray, bar = $('i', el), label = $('span', el);
@@ -436,6 +467,7 @@ export class Library {
     const menu = this.#menu(anchor, [
       ['file', '选择书籍文件', () => pickFiles({ accept: ACCEPT }).then(f => this.import(f))],
       ['folder', '导入整个文件夹', () => pickFiles({ directory: true }).then(f => this.import(f))],
+      ['paste', '从粘贴板导入', () => this.pasteImport()],
       up ? ['cloud', localStorage.getItem('zb-upload') !== '0' ? '导入时存入云端 ✓' : '导入时存入云端', () => { localStorage.setItem('zb-upload', localStorage.getItem('zb-upload') === '0' ? '1' : '0'); toast(localStorage.getItem('zb-upload') === '0' ? '之后导入的书只存在本机' : '之后导入的书会存入云端，多端可读'); }] : null,
     ].filter(Boolean), '支持 PDF · EPUB · MOBI/AZW3 · TXT · Markdown · Word · FB2 · HTML · CBZ');
     return menu;
@@ -504,6 +536,14 @@ export class Library {
     ui.qClear.onclick = () => { ui.q.value = ''; this.q = ''; ui.search.classList.remove('has'); this.#apply(true); ui.q.focus(); };
     ui.searchToggle.onclick = () => { this.root.classList.add('search-focus'); ui.q.focus(); };
     ui.addBtn.onclick = e => this.#importMenu(e.currentTarget);
+    ui.pasteBtn.onclick = () => this.pasteImport();
+    // 书架上直接粘贴（Ctrl+V / ⌘V）：文件管理器里复制的书、网页或编辑器里复制的文字都能放上书架
+    document.addEventListener('paste', e => {
+      if (this.root.hidden || document.documentElement.classList.contains('reading') || this.root.classList.contains('sheet-open')) return;
+      if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable) return;
+      e.preventDefault();
+      fromDataTransfer(e.clipboardData).then(r => this.#importPasted(r));
+    });
     ui.themeBtn.onclick = () => toggleNight();
     ui.moreBtn.onclick = e => this.#moreMenu(e.currentTarget);
     ui.keyBtn.onclick = () => this.#login();
@@ -610,6 +650,7 @@ const TEMPLATE = `
   <div class="lib-actions">
     <button class="ib mobile-only" data-ref="searchToggle" aria-label="搜索">${icon('search')}</button>
     <button class="ib" data-ref="keyBtn" aria-label="打开云端书库" title="打开云端书库">${icon('key')}</button>
+    <button class="ib" data-ref="pasteBtn" aria-label="从粘贴板导入" title="从粘贴板导入（也可在书架上直接 Ctrl+V）">${icon('paste')}</button>
     <button class="ib" data-ref="addBtn" aria-label="导入书籍" title="导入书籍">${icon('plus')}</button>
     <button class="ib" data-ref="themeBtn" aria-label="日夜切换" title="日夜切换 (D)"><span class="sun">${icon('sun')}</span><span class="moon">${icon('moon')}</span></button>
     <button class="ib" data-ref="moreBtn" aria-label="更多" title="排序与视图">${icon('more')}</button>

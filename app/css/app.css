@@ -141,7 +141,7 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .lib-search.has kbd { display: none; }
 .search-focus .lib-search { box-shadow: inset 0 0 0 1.5px var(--accent), 0 6px 24px -8px rgba(61, 106, 99, .35); }
 .mobile-only { display: none; }
-@media (max-width: 420px) { .brand-txt .wk { display: none; } }
+@media (max-width: 420px) { .brand-txt .wk { display: none; } .lib-actions .ib { width: 36px; } }
 
 @media (min-width: 760px) {
   .lib-head { grid-template-columns: 1fr minmax(260px, 440px) 1fr; padding-top: calc(16px + var(--sat)); padding-bottom: 14px; }
@@ -342,6 +342,8 @@ kbd { font: 11px/1 var(--font-ui); color: var(--ink-3); border: 1px solid var(--
 .login .sub { margin: 8px 0 20px; font-size: 13px; color: var(--ink-3); line-height: 1.7; }
 .key-input { width: 100%; height: 48px; border: 0; border-radius: 14px; padding: 0 16px; background: var(--bg-2); font-size: 17px; letter-spacing: .12em; text-align: center; color: var(--ink); }
 .key-input:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.paste-input { display: block; width: 100%; min-height: 160px; max-height: 50vh; margin-bottom: 14px; border: 0; border-radius: 14px; padding: 12px 14px; background: var(--bg-2); font: 14px/1.7 var(--font-ui); color: var(--ink); resize: vertical; text-align: left; }
+.paste-input:focus { box-shadow: inset 0 0 0 1.5px var(--accent); outline: none; }
 .key-msg { min-height: 20px; margin: 8px 0 10px; font-size: 13px; color: var(--seal); }
 
 .menu { position: fixed; z-index: 45; min-width: 220px; max-width: 320px; padding: 6px; border-radius: 16px; background: var(--glass); -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4); box-shadow: inset 0 0 0 1px var(--line), var(--shadow-2); opacity: 0; transform: translateY(-6px) scale(.98); transform-origin: top right; pointer-events: none; transition: opacity .2s, transform .3s var(--ease); }

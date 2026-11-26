@@ -30,7 +30,8 @@
 | 调整排版 | 宋、楷、黑三种字体，素、宣、青、墨四种纸色。宽屏可双页并排；「方式」选「上下滑动」可单页连续阅读，PDF 在此模式下可用 Ctrl+滚轮、双指或右下角按钮放大。 |
 | 查找和摘录 | 通过目录或全文搜索定位段落，添加书签，选中文字后划线或写笔记。笔记可导出为 Markdown（每条笔记带出所在原文段落，划线处用 `==…==` 标出；zip 书连图片一起导出为 zip）。 |
 | PDF 批注 | 在有文字层的 PDF 上选中文字即可划线、写笔记。打开 PDF 时自动载入文件自带的高亮和批注，可改色、改写或删除。在笔记页点「下载含笔记的 PDF」，所有改动会写成标准 PDF 批注，其他 PDF 阅读器也能看到。 |
-| 管理书架 | 可导入文件或整个目录，按分类浏览，搜索书名。已解锁云端书库时可选择导入到本机或云端；上传前比对整个文件的 MD5，书库里已有的书不会重复上传。右键（手机上长按）书籍打开详情，可点铅笔改书名，没有封面图的书封面上的书名随之更新；详情里的「摘要」取自书中第一段正文。 |
+| 从粘贴板导入 | 点书架右上角的粘贴板按钮，或在书架上直接按 Ctrl+V / ⌘V。复制的 PDF、EPUB、MOBI、Word 等文件按原格式导入；复制的纯文字按 Markdown 导入，书名取第一个标题或首行。浏览器不允许读取粘贴板时会弹出粘贴框，手机上长按即可粘贴。 |
+| 管理书架 | 可导入文件或整个目录，按分类浏览，搜索书名。已解锁云端书库时可选择导入到本机或云端；上传前比对整个文件的 MD5，书库里已有的书不会重复上传；超过 64 MB 的文件自动分片上传，断线会从断点续传。右键（手机上长按）书籍打开详情，可点铅笔改书名，没有封面图的书封面上的书名随之更新；详情里的「摘要」取自书中第一段正文。 |
 
 **桌面快捷键**　`←` / `→` 翻页，`T` 打开目录，`/` 搜索，`B` 加书签，`D` 切换日夜，`F` 全屏，`Esc` 返回。
 
@@ -72,18 +73,28 @@ BOOKS_DIR="$PWD/books" node server/dev.mjs
 BOOKS_DIR="$PWD/books" DATA_DIR="$PWD/devdata" node server/build-catalog.mjs
 ```
 
+## 测试
+
+测试只用 Node.js 自带的 `node:test`，无需安装依赖。GitHub Actions 会在每次推送和 PR 时运行。
+
+```bash
+npm test          # 格式识别、Markdown 公式、粘贴板导入、服务端上传 / MD5 去重 / 分片上传
+npm run check     # 所有脚本的语法检查
+```
+
 ## 服务器部署
 
 现有站点使用 Linux、systemd 与 nginx。Node 服务监听 `127.0.0.1:8730`，nginx 将 `/read/` 转发给该服务。前端、书库与运行数据分别位于 `/root/zhibai/app/`、`books/` 和 `data/`。
 
 | 操作 | 在项目根目录执行 |
 | --- | --- |
-| 更新现有站点代码 | `bash tools/deploy.sh` |
+| 更新现有站点代码 | `bash tools/deploy.sh`。部署前把当前版本存到服务器的 `.releases/`（保留最近 5 个），重启后自检不通过会自动退回。 |
+| 退回上一版 / 查看保留的版本 | `bash tools/deploy.sh rollback` / `bash tools/deploy.sh list` |
 | 同步书籍并重建书目 | `bash tools/sync-books.sh "/path/to/books"`。按路径和大小识别变动，保留云端已有文件。 |
 | 查看运行状态 | `ssh server "systemctl status zhibai --no-pager"` |
 | 查看服务日志 | `ssh server "journalctl -u zhibai -n 50 --no-pager"` |
 
-这些脚本面向现有 SSH 别名 `server`。首次在另一台机器部署时，先创建应用目录并部署代码，再按实际环境调整 `tools/setup-server.sh` 中的 Node 路径、nginx 配置和工具箱目录。该脚本负责安装 systemd 服务、配置反向代理并登记首页入口。书籍、封面、钥匙和阅读记录保存在运行环境，备份时应包含 `books/` 和 `data/`。
+这些脚本默认面向 SSH 别名 `server` 与目录 `/root/zhibai`，可用环境变量 `ZHIBAI_HOST`、`ZHIBAI_DIR` 改写；`ssh` 不在 PATH 上时用 `SSH=/path/to/ssh` 指定。首次在另一台机器部署时，先创建应用目录并部署代码，再按实际环境调整 `tools/setup-server.sh` 中的 Node 路径、nginx 配置和工具箱目录。该脚本负责安装 systemd 服务、配置反向代理并登记首页入口。书籍、封面、钥匙和阅读记录保存在运行环境，备份时应包含 `books/` 和 `data/`。
 
 ## 代码导航
 
@@ -94,12 +105,13 @@ BOOKS_DIR="$PWD/books" DATA_DIR="$PWD/devdata" node server/build-catalog.mjs
 | `app/js/library.js`、`reader.js`、`store.js` | 书架、阅读菜单、设备与云端状态 |
 | `app/vendor/`、`app/fonts/` | 随应用分发的渲染库与字体 |
 | `server/` | HTTP 服务、本地开发入口与书目生成器。可选的 `meta.json` 用于定制分类、作者与丛书。 |
-| `tools/` | 部署与书库同步脚本 |
+| `tools/` | 部署、回滚与书库同步脚本 |
+| `test/` | `node:test` 测试 |
 
 ## 常见问题
 
 **换设备后为什么看不到刚导入的书？**  
-本机导入的文件保存在当前浏览器中。打开云端书库，再从书籍详情选择「存入云端」。网页导入时超过 95 MiB 的文件先保存在本机，可使用同步脚本传到服务器。
+本机导入的文件保存在当前浏览器中。打开云端书库，再从书籍详情选择「存入云端」。大文件也可以直接在网页里存入云端（自动分片上传）；整个书籍目录仍可用同步脚本一次传到服务器。
 
 **已有的 Markdown 书籍要重新导入吗？**  
 刷新网页并重新打开原书即可。公式在打开文档时排版。
