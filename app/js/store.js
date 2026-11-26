@@ -11,7 +11,11 @@ export const DEFAULTS = {
   indent: true,
   justify: true,
   margin: 1,            // 0 窄 1 适中 2 宽
-  turn: 'curl',         // curl | cover | slide | fade | none | scroll
+  mode: 'auto',         // auto | paged | scroll：auto 按设备、浏览器与窗口大小自动选
+  turn: 'curl',         // 左右翻页的动画：curl | cover | slide | fade | none
+  fontAuto: true,       // 字号随设备与窗口自动
+  autoSpeed: 2,         // 自动翻页速度 1 慢 2 中 3 快
+  ttsRate: 1,           // 听书语速
   spread: 'auto',       // auto | single | double
   pdfTint: true,
   pdfCrop: 'auto',     // auto：手机上自动裁白边
@@ -91,6 +95,13 @@ const api = {
 };
 export { api };
 
+// 旧版把「上下滑动」存成 turn: 'scroll'，也没有自动排版：迁移为 mode
+function migrate(s) {
+  if (s.turn === 'scroll') { s.turn = 'curl'; if (!s.mode || s.mode === 'auto') s.mode = 'auto'; }
+  if (!['auto', 'paged', 'scroll'].includes(s.mode)) s.mode = 'auto';
+  return s;
+}
+
 class Store extends Emitter {
   settings = { ...DEFAULTS };
   books = new Map();      // id -> book
@@ -104,7 +115,7 @@ class Store extends Emitter {
 
   async init() {
     const saved = await db.get('kv', 'settings');
-    if (saved) this.settings = { ...DEFAULTS, ...saved };
+    if (saved) this.settings = migrate({ ...DEFAULTS, ...saved });
     for (const [id, st] of await db.entries('state')) this.states.set(id, st);
     for (const [id, b] of await db.entries('books')) this.books.set(id, { ...b, id, local: true });
     const cached = await db.get('kv', 'catalog');
@@ -147,7 +158,7 @@ class Store extends Emitter {
         this.states.set(id, merged); db.put('state', id, merged);
       }
       if (remote.settings && (remote.settings.t || 0) > (this.settings.t || 0)) {
-        this.settings = { ...DEFAULTS, ...remote.settings }; db.put('kv', 'settings', this.settings); this.emit('settings', this.settings, true);
+        this.settings = migrate({ ...DEFAULTS, ...remote.settings }); db.put('kv', 'settings', this.settings); this.emit('settings', this.settings, true);
       }
       if (changed) this.emit('states');
     } catch {}

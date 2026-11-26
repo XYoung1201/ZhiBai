@@ -9,8 +9,11 @@ import { pdfToBook } from './reflow.js';
 import { selectionQuads, mergeImported, exportPdf, tidy } from './annot.js';
 import { applyTheme, effectiveTheme, THEMES } from './theme.js';
 import { fragmentToMarkdown, texOf, copyText, makeZip, saveBlob } from './mdcopy.js';
+import { autoMode, autoFontSize } from './layout.js';
 
-const TURNS = [['curl', '仿真'], ['cover', '覆盖'], ['slide', '平移'], ['fade', '淡入'], ['scroll', '滚动']];
+const TURNS = [['curl', '仿真'], ['cover', '覆盖'], ['slide', '平移'], ['fade', '淡入']];
+const AUTO_PAGE_SEC = [0, 45, 28, 16];   // 自动翻页：每页停留秒数（慢 / 中 / 快）
+const AUTO_SCROLL_PX = [0, 18, 32, 56];  // 自动滚动：每秒像素
 const COLORS = [['y', '缃'], ['g', '青'], ['b', '黛'], ['r', '绛']];
 
 export class Reader {
@@ -21,6 +24,18 @@ export class Reader {
     this.ui = Object.fromEntries($$('[data-ref]', root).map(e => [e.dataset.ref, e]));
     this.#wire();
   }
+
+  // ================= 自动排版 =================
+  // 「方式」与「字号」可设为自动：按设备类型、浏览器与窗口大小决定，窗口一变就重新判断
+  #env() { return { width: innerWidth, height: innerHeight, touch: isTouch, ua: navigator.userAgent, kind: this.doc?.kind }; }
+  #auto() { return autoMode(this.#env()); }
+  #isScroll() { const m = store.settings.mode; return m === 'scroll' || (m !== 'paged' && this.#auto().mode === 'scroll'); }
+  #fontSize() { const s = store.settings; return s.fontAuto ? autoFontSize(this.#env()) : s.fontSize; }
+  #eff() {
+    const s = store.settings;
+    return { ...s, fontSize: this.#fontSize(), turn: this.#isScroll() ? 'scroll' : (s.turn === 'scroll' ? 'curl' : s.turn) };
+  }
+  #setSize(v) { store.set({ fontSize: clamp(v, 14, 30), fontAuto: false }); }
 
   // ================= 打开 / 关闭 =================
   async open(book, { onFirstPaint, pdf } = {}) {
@@ -52,7 +67,7 @@ export class Reader {
       onFirstPaint?.();
       this.#startSession();
       this.#scanAnnots();
-      if (doc.kind === 'pdf' && cropOn()) doc.computeCrop().then(() => { if (this.doc === doc && doc.crop && store.settings.turn !== 'scroll') this.#mountView(this.anchor); });
+      if (doc.kind === 'pdf' && cropOn()) doc.computeCrop().then(() => { if (this.doc === doc && doc.crop && !this.#isScroll()) this.#mountView(this.anchor); });
       if (doc.kind === 'flow') setTimeout(() => doc.ensureSizes().then(() => this.doc === doc && this.#updateUI()), 300);
       this.#hint();
     } catch (e) {
@@ -92,8 +107,9 @@ export class Reader {
     try { await this.#mountNew(anchor); } finally { if (old && old !== this.view) old.destroy(); }
   }
   async #mountNew(anchor) {
-    const s = store.settings, doc = this.doc;
+    const s = this.#eff(), doc = this.doc;
     const scroll = s.turn === 'scroll';
+    this.mounted = { scroll, fs: s.fontSize };
     this.root.classList.toggle('scrolling', scroll);
     const onTap = (zone, e) => this.#onTap(zone, e);
     if (doc.kind === 'pdf') {
@@ -133,11 +149,12 @@ export class Reader {
   #layoutDoc() {
     const W = this.stage.clientWidth, H = this.stage.clientHeight;
     this.lastSize = W + 'x' + H;
-    this.doc.setLayout(W, H, store.settings, this.#insets());
+    this.doc.setLayout(W, H, this.#eff(), this.#insets());
   }
 
   async close() {
     this.token = null;
+    this.#stopAuto(true); this.#stopTts(true);
     this.#endSession();
     this.#saveNow();
     this.#closeSheets(); this.#hideSel(); this.ui.notePop.classList.remove('show'); this.#closeEditor(null);
@@ -227,6 +244,7 @@ export class Reader {
       return;
     }
     if (this.ui.notePop.classList.contains('show')) { this.ui.notePop.classList.remove('show'); return; }
+    if (this.autoT || this.tts) { this.#stopAuto(); this.#stopTts(); return; }
     if (this.sheet) { this.#closeSheets(); return; }
     if (this.root.classList.contains('chrome')) { this.#chrome(false); return; }
     if (this.view instanceof Pager && zone) { this.turn(zone); return; }
@@ -239,6 +257,7 @@ export class Reader {
   }
   #onEdge(dir) {
     if (dir < 0) { toast('已是第一页'); return; }
+    this.#stopAuto(true); this.#stopTts(true);
     this.#saveNow();
     this.#showEnd();
   }
@@ -503,11 +522,12 @@ export class Reader {
     const el = this.ui[name + 'Sheet'];
     if (name === 'toc') this.#renderTocPanel();
     if (name === 'type') this.#renderTypePanel();
+    if (name === 'more') this.#renderMorePanel();
     el.classList.add('open');
     if (name === 'search') setTimeout(() => this.ui.q.focus(), 60);
   }
   #closeSheets(keepChrome) {
-    for (const k of ['toc', 'type', 'search']) this.ui[k + 'Sheet']?.classList.remove('open');
+    for (const k of ['toc', 'type', 'search', 'more']) this.ui[k + 'Sheet']?.classList.remove('open');
     this.sheet = null; this.root.classList.remove('sheet-open');
     if (!keepChrome && this.root.classList.contains('chrome') && isTouch) {}
   }
@@ -628,25 +648,22 @@ export class Reader {
       body.push(row('版面', mode, h('p', { class: 'row-note' }, reflow ? '按文字重新排版，字号、行距、页边随你调；图表与公式请切回原版。' : textual === false ? '这是扫描版，没有文字可重排；可以裁去白边、加深字迹。' : textual ? '「重排」把页面文字重新排版，手机上读起来更舒服。' : '正在查看这份 PDF 是否带文字…')));
     }
     if (!pdf) {
-      const size = h('input', { type: 'range', min: 14, max: 30, step: 1, value: s.fontSize, class: 'slider', oninput: e => { sizeVal.textContent = e.target.value; this.#pendingSize(+e.target.value); } });
-      const sizeVal = h('b', { class: 'val' }, s.fontSize);
+      const fs = this.#fontSize();
+      const size = h('input', { type: 'range', min: 14, max: 30, step: 1, value: fs, class: 'slider', oninput: e => { sizeVal.textContent = e.target.value; autoBtn.classList.remove('on'); this.#pendingSize(+e.target.value); } });
+      const sizeVal = h('b', { class: 'val' }, fs);
+      const autoBtn = h('button', { class: 'chip' + (s.fontAuto ? ' on' : ''), title: '按设备与窗口大小自动选字号', onclick: () => { store.set({ fontAuto: !s.fontAuto }); this.#renderTypePanel(); } }, '自动');
       body.push(
-        row('字号', h('div', { class: 'size-row' }, h('button', { class: 'ib sm a-', onclick: () => { store.set({ fontSize: clamp(s.fontSize - 1, 14, 30) }); this.#renderTypePanel(); } }, 'A'), size, h('button', { class: 'ib sm a+', onclick: () => { store.set({ fontSize: clamp(s.fontSize + 1, 14, 30) }); this.#renderTypePanel(); } }, 'A'), sizeVal)),
+        row('字号', h('div', { class: 'size-row' }, h('button', { class: 'ib sm a-', onclick: () => { this.#setSize(fs - 1); this.#renderTypePanel(); } }, 'A'), size, h('button', { class: 'ib sm a+', onclick: () => { this.#setSize(fs + 1); this.#renderTypePanel(); } }, 'A'), sizeVal, autoBtn)),
         row('字体', seg('font', [['serif', '宋'], ['kai', '楷'], ['sans', '黑']])),
         row('行距', seg('lineHeight', [[1.55, '紧'], [1.8, '适中'], [2.05, '舒展'], [2.3, '疏朗']])),
         row('页边', seg('margin', [[0, '窄'], [1, '适中'], [2, '宽']])),
         row('段落', h('div', { class: 'toggles' }, toggle('indent', '首行缩进'), toggle('justify', '两端对齐'))),
       );
     }
-    // 阅读方式：左右翻页 / 上下滑动（单页连续，适合放大看 PDF）
-    const scrollOn = s.turn === 'scroll';
-    const lastTurn = () => { const t = localStorage.getItem('zb-turn'); return t && t !== 'scroll' ? t : 'curl'; };
-    body.push(row('方式', h('div', { class: 'seg', role: 'radiogroup' }, [[false, '左右翻页', 'pages'], [true, '上下滑动', 'scroll']].map(([v, label, ic]) =>
-      h('button', { class: scrollOn === v ? 'on' : '', role: 'radio', 'aria-checked': scrollOn === v, html: icon(ic) + `<span>${label}</span>`, onclick: () => {
-        if (v === scrollOn) return;
-        if (v) localStorage.setItem('zb-turn', s.turn);
-        store.set({ turn: v ? 'scroll' : lastTurn() }); this.#renderTypePanel();
-      } })))));
+    // 阅读方式：自动 / 左右翻页 / 上下滑动（单页连续，适合放大看 PDF）
+    const scrollOn = this.#isScroll(), a = this.#auto();
+    body.push(row('方式', seg('mode', [['auto', '自动', 'layers'], ['paged', '左右翻页', 'pages'], ['scroll', '上下滑动', 'scroll']]),
+      s.mode === 'auto' ? h('p', { class: 'row-note' }, `现在是${a.mode === 'scroll' ? '上下滑动' : '左右翻页'}（${a.why}）。设备、浏览器或窗口大小变化时自动切换，字号设为自动时也一起调整。`) : null));
     if (!scrollOn) body.push(
       row('翻页', seg('turn', TURNS.filter(([v]) => v !== 'scroll').map(([v, l]) => [v, l]))),
       row('版式', seg('spread', [['auto', '自动', null], ['single', '单页', 'page'], ['double', '双页', 'pages']])),
@@ -672,7 +689,161 @@ export class Reader {
     this.doc = null;
     await this.open(book, { pdf }).catch(() => {});
   }
-  #pendingSize = debounce(v => store.set({ fontSize: v }), 220);
+  #pendingSize = debounce(v => this.#setSize(v), 220);
+
+  // ---------- 更多：统计、自动翻页、听书、跳转、全屏… ----------
+  #renderMorePanel() {
+    const b = this.book, s = store.settings, flow = this.doc?.kind === 'flow';
+    const p = this.#progress(), read = store.readingTime(b.id);
+    const left = p > .02 && p < .999 && read > 120 ? read * (1 - p) / p : null;
+    this.ui.moreSub.textContent = b.title;
+    const stat = (v, l) => h('div', { class: 'stat' }, h('b', null, v), h('span', null, l));
+    const stats = h('div', { class: 'more-stats' }, stat(pct(p), '已读'), stat(fmtDuration(read), '本书用时'), stat(left ? fmtDuration(left) : '—', '预计还需'), stat(fmtDuration(store.todayTime()), '今日阅读'));
+    const tile = (ic, label, fn, { on = false, disabled = false, title } = {}) => h('button', { class: 'tile' + (on ? ' on' : ''), disabled, title, html: icon(ic) + `<span>${esc(label)}</span>`, onclick: fn });
+    const marked = !!this.#isMarkedHere();
+    const canTts = flow && 'speechSynthesis' in window;
+    const tiles = h('div', { class: 'tiles' },
+      tile('bookmark', marked ? '移除书签' : '加书签', async () => { await this.toggleMark(); this.#renderMorePanel(); }, { on: marked }),
+      tile('search', '书内搜索', () => this.#openSearch()),
+      tile('auto', this.autoT ? '停止自动翻页' : '自动翻页', () => { this.autoT ? this.#stopAuto() : this.#startAuto(); }, { on: !!this.autoT }),
+      tile('volume', this.tts ? '停止听书' : '听书', () => { this.tts ? this.#stopTts() : this.#startTts(); }, { on: !!this.tts, disabled: !canTts, title: canTts ? '' : 'PDF 原版不能朗读，可在排版里切到「重排」' }),
+      tile(document.fullscreenElement ? 'shrink' : 'expand', document.fullscreenElement ? '退出全屏' : '全屏', () => { this.#fullscreen(); setTimeout(() => this.sheet === 'more' && this.#renderMorePanel(), 300); }),
+      tile('sun', s.keepAwake ? '常亮：开' : '常亮：关', () => { store.set({ keepAwake: !s.keepAwake }); this.#renderMorePanel(); }, { on: s.keepAwake }),
+      tile('link', '复制链接', async () => { const ok = await copyText(location.href.split('#')[0] + '#/b/' + b.id); toast(ok ? '已复制这本书的链接（需在同一书库打开）' : '复制失败'); }),
+      tile('download', '下载原书', () => this.#downloadOriginal()),
+    );
+    const seg = (key, opts) => h('div', { class: 'seg', role: 'radiogroup' }, opts.map(([v, label]) => h('button', { class: s[key] === v ? 'on' : '', onclick: () => {
+      store.set({ [key]: v });
+      if (key === 'ttsRate' && this.tts) this.#restartTts();
+      this.#renderMorePanel();
+    } }, label)));
+    const row = (label, ...kids) => h('div', { class: 'row' }, h('div', { class: 'row-l' }, label), h('div', { class: 'row-c' }, ...kids));
+    // 跳转：PDF 原版按页码；其余按百分比
+    const pdf = this.doc?.kind === 'pdf';
+    const jump = h('input', { class: 'jump-input', type: 'text', inputmode: 'decimal', enterkeyhint: 'go', placeholder: pdf ? `页码 1–${this.doc.n}，或 50%` : '百分比，如 50%' });
+    const go = async () => {
+      const v = jump.value.trim(), n = parseFloat(v);
+      if (!Number.isFinite(n)) { jump.focus(); return; }
+      const asPct = /%$/.test(v) || !pdf;
+      this.#closeSheets(); this.#chrome(false);
+      if (pdf) this.go({ page: clamp(asPct ? Math.round(n / 100 * (this.doc.n - 1)) : Math.round(n) - 1, 0, this.doc.n - 1) });
+      else this.go(await this.doc.anchorOfProgress(clamp(n / 100, 0, 1)));
+    };
+    jump.addEventListener('keydown', e => e.key === 'Enter' && go());
+    this.ui.moreBody.replaceChildren(stats, tiles,
+      row('跳转', h('div', { class: 'jump-row' }, jump, h('button', { class: 'btn sm', onclick: go }, '前往'))),
+      row('自动翻页', seg('autoSpeed', [[1, '慢'], [2, '中'], [3, '快']])),
+      canTts ? row('听书语速', seg('ttsRate', [[.8, '慢'], [1, '中'], [1.25, '快'], [1.6, '很快']])) : '',
+      h('p', { class: 'row-note more-note' }, isTouch ? '自动翻页或听书时，轻点页面即可停止。' : '自动翻页或听书时，点一下页面即可停止 · A 开关自动翻页 · F 全屏'));
+  }
+  async #downloadOriginal() {
+    const b = this.book, name = b.name || `${b.title}.${b.format}`;
+    try {
+      const local = b.local ? await store.localFile(b.id) : null;
+      if (local) return saveBlob(local, name);
+      if (b.cloud) { const a = h('a', { href: api.fileUrl(b.id), download: name }); document.body.append(a); a.click(); a.remove(); return; }
+      toast('找不到这本书的文件');
+    } catch (e) { toast('下载失败：' + e.message); }
+  }
+
+  // 自动翻页：翻页模式每隔几十秒翻一页（速度在 interval 里实时读取）；滚动模式匀速向下滚
+  #startAuto() {
+    this.#stopAuto(true); this.#stopTts(true);
+    if (this.view instanceof Pager) {
+      let since = performance.now();
+      this.autoT = setInterval(async () => {
+        if (this.sheet || document.visibilityState !== 'visible' || this.editing) { since = performance.now(); return; }
+        // 字越大、一页字越少，停留越短
+        const sec = Math.max(6, AUTO_PAGE_SEC[store.settings.autoSpeed || 2] * (19 / this.#fontSize()) ** 2);
+        if (performance.now() - since < sec * 1000) return;
+        since = performance.now();
+        if (await this.turn(1) === false) this.#stopAuto(true);
+      }, 500);
+    } else {
+      const el = this.view?.el; if (!el) return;
+      let last = performance.now(), acc = 0;
+      const step = now => {
+        if (!this.autoT) return;
+        const dt = Math.min(100, now - last); last = now;
+        if (!this.sheet && document.visibilityState === 'visible') {
+          acc += AUTO_SCROLL_PX[store.settings.autoSpeed || 2] * dt / 1000;
+          if (acc >= 1) {
+            const px = Math.floor(acc), before = el.scrollTop; acc -= px; el.scrollTop += px;
+            if (el.scrollTop === before && before > 0) { this.#stopAuto(true); toast('已到末尾'); return; }
+          }
+        }
+        this.autoT = requestAnimationFrame(step);
+      };
+      this.autoRaf = true;
+      this.autoT = requestAnimationFrame(step);
+    }
+    this.root.classList.add('auto-on');
+    this.#chrome(false); this.#closeSheets();
+    toast('自动翻页已开启，轻点页面停止');
+  }
+  #stopAuto(quiet) {
+    if (!this.autoT) return;
+    if (this.autoRaf) cancelAnimationFrame(this.autoT); else clearInterval(this.autoT);
+    this.autoT = null; this.autoRaf = false;
+    this.root.classList.remove('auto-on');
+    if (!quiet) toast('已停止自动翻页');
+  }
+
+  // 听书：朗读当前屏上的段落，读完自动翻页接着读
+  #startTts() {
+    if (!('speechSynthesis' in window) || this.doc?.kind !== 'flow') { toast('此浏览器不支持朗读'); return; }
+    this.#stopAuto(true); this.#stopTts(true);
+    this.tts = { token: uid(), lastText: '' };
+    this.root.classList.add('tts-on');
+    this.#chrome(false); this.#closeSheets();
+    toast('开始听书，轻点页面停止');
+    this.#ttsPage(this.tts.token);
+  }
+  #restartTts() { const t = this.tts; if (!t) return; t.token = uid(); speechSynthesis.cancel(); this.#ttsPage(t.token, true); }
+  #stopTts(quiet) {
+    if (!this.tts) return;
+    this.tts = null;
+    try { speechSynthesis.cancel(); } catch {}
+    this.root.classList.remove('tts-on');
+    for (const e of $$('.tts-cur', this.stage)) e.classList.remove('tts-cur');
+    if (!quiet) toast('已停止听书');
+  }
+  #visibleBlocks() {
+    const W = innerWidth, H = innerHeight;
+    return $$('p, h1, h2, h3, h4, h5, h6, li, blockquote, dt, dd, figcaption, td, th, pre', this.stage).filter(el => {
+      if (el.querySelector('p, li, blockquote, pre') || el.closest('[aria-hidden="true"]')) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.bottom > 4 && r.top < H - 4 && r.right > 4 && r.left < W - 4 && (el.textContent || '').trim();
+    }).sort((a, b) => { const x = a.getBoundingClientRect(), y = b.getBoundingClientRect(); return Math.abs(x.left - y.left) > W / 4 ? x.left - y.left : x.top - y.top; });
+  }
+  async #ttsPage(token, again) {
+    const t = this.tts; if (!t || t.token !== token) return;
+    let blocks = this.#visibleBlocks();
+    // 跨页的段落上一页已经读过：跳过
+    if (!again && blocks.length && blocks[0].textContent.trim() === t.lastText) blocks = blocks.slice(1);
+    const lang = this.doc?.lang || 'zh-CN';
+    const voice = speechSynthesis.getVoices().find(v => v.lang?.toLowerCase().startsWith(lang.slice(0, 2).toLowerCase()));
+    for (const el of blocks) {
+      if (this.tts?.token !== token) return;
+      el.classList.add('tts-cur');
+      await new Promise(res => {
+        const u = new SpeechSynthesisUtterance(el.textContent.replace(/\s+/g, ' ').trim());
+        u.lang = lang; if (voice) u.voice = voice; u.rate = store.settings.ttsRate || 1;
+        u.onend = u.onerror = () => res();
+        speechSynthesis.speak(u);
+      });
+      el.classList.remove('tts-cur');
+      if (this.tts?.token !== token) return;
+      t.lastText = el.textContent.trim();
+      this.lastActive = Date.now();
+    }
+    if (this.tts?.token !== token) return;
+    const paged = this.view instanceof Pager, top = this.view?.el?.scrollTop;
+    if (await this.turn(1) === false) { this.#stopTts(true); return; }
+    await sleep(paged ? 500 : 700);
+    if (!paged && this.view?.el?.scrollTop === top) { this.#stopTts(true); toast('读完了'); return; } // 滚到底了
+    this.#ttsPage(token);
+  }
 
   // ---------- 书内搜索 ----------
   #openSearch(q) {
@@ -712,11 +883,11 @@ export class Reader {
     applyTheme(s);
     this.#applyType();
     const keys = Object.keys(patch);
-    const relayoutKeys = ['font', 'fontSize', 'lineHeight', 'paraSpace', 'indent', 'justify', 'margin', 'spread'];
-    if (keys.includes('turn')) {
-      const wasScroll = !(this.view instanceof Pager), isScroll = s.turn === 'scroll';
-      if (wasScroll !== isScroll) { await this.#mountView(this.anchor); return; }
-      this.view.setEffect?.(s.turn);
+    const relayoutKeys = ['font', 'fontSize', 'fontAuto', 'lineHeight', 'paraSpace', 'indent', 'justify', 'margin', 'spread'];
+    if (keys.includes('turn') || keys.includes('mode') || remote) {
+      const wasScroll = !(this.view instanceof Pager), isScroll = this.#isScroll();
+      if (wasScroll !== isScroll) { this.#stopAuto(true); await this.#mountView(this.anchor); return; }
+      if (!isScroll) this.view.setEffect?.(this.#eff().turn);
     }
     if (keys.includes('pdfCrop') && this.doc.kind === 'pdf') {
       if (cropOn()) await this.doc.computeCrop(); else this.doc.crop = null;
@@ -727,7 +898,7 @@ export class Reader {
   }
   #applyType() {
     const s = store.settings, r = this.root.style;
-    r.setProperty('--r-fs', s.fontSize + 'px');
+    r.setProperty('--r-fs', this.#fontSize() + 'px');
     r.setProperty('--r-lh', s.lineHeight);
     r.setProperty('--r-para', s.paraSpace + 'em');
     r.setProperty('--r-indent', s.indent ? '2em' : '0');
@@ -737,6 +908,7 @@ export class Reader {
     this.root.classList.toggle('pdf-tint', !!s.pdfTint);
     r.setProperty('--pdf-boost', ['contrast(1)', 'contrast(1.35) brightness(.98)', 'contrast(1.8) brightness(.94)'][s.pdfInk || 0]);
   }
+  #remount = debounce(() => { if (this.doc && this.view) this.#mountView(this.anchor); }, 160);
   #relayout = debounce(async () => {
     if (!this.doc || !this.view) return;
     if (this.view.t) { this.#relayout(); return; } // 正在翻页时稍后再排
@@ -790,7 +962,9 @@ export class Reader {
       else if (act === 'type') this.#openSheet('type');
       else if (act === 'night') toggleNight();
       else if (act === 'full') this.#fullscreen();
+      else if (act === 'more') this.#openSheet('more');
     };
+    ui.moreClose.onclick = () => this.#closeSheets();
     for (const b of $$('.tabs button', ui.tocSheet)) b.onclick = () => { this.#tab = b.dataset.tab; this.#renderTocPanel(); };
     ui.q.addEventListener('input', () => this.#runSearch());
     ui.q.addEventListener('keydown', e => { if (e.key === 'Enter') { this.#runSearch.flush(); } if (e.key === 'Escape') this.#closeSheets(); });
@@ -826,7 +1000,11 @@ export class Reader {
     new ResizeObserver(() => {
       const size = this.stage.clientWidth + 'x' + this.stage.clientHeight;
       if (size === this.lastSize || this.root.hidden) return;
-      if (this.view) this.#relayout();
+      if (!this.view) return;
+      // 自动排版：窗口变化后方式或字号该换了
+      if (this.mounted && this.#isScroll() !== this.mounted.scroll) { this.#stopAuto(true); this.#applyType(); this.#remount(); return; }
+      this.#applyType();
+      this.#relayout();
     }).observe(this.stage);
 
     // 鼠标静止后隐藏光标
@@ -887,8 +1065,9 @@ export class Reader {
       case 'f': case 'F': this.#fullscreen(); break;
       case 'd': case 'D': $('[data-act="night"]', this.root).click(); break;
       case 'm': case 'M': this.#chrome(!this.root.classList.contains('chrome')); break;
-      case '+': case '=': if (this.doc.kind === 'flow') store.set({ fontSize: clamp(store.settings.fontSize + 1, 14, 30) }); else this.view?.setZoom?.(this.view.zoom * 1.2); break;
-      case '-': if (this.doc.kind === 'flow') store.set({ fontSize: clamp(store.settings.fontSize - 1, 14, 30) }); else this.view?.setZoom?.(this.view.zoom / 1.2); break;
+      case '+': case '=': if (this.doc.kind === 'flow') this.#setSize(this.#fontSize() + 1); else this.view?.setZoom?.(this.view.zoom * 1.2); break;
+      case '-': if (this.doc.kind === 'flow') this.#setSize(this.#fontSize() - 1); else this.view?.setZoom?.(this.view.zoom / 1.2); break;
+      case 'a': case 'A': this.autoT ? this.#stopAuto() : this.#startAuto(); break;
       case '0': this.view?.fitWidth?.(); break;
       case 'Home': if (!scroll) this.go(this.doc.kind === 'pdf' ? { page: 0 } : { s: 0, o: 0 }); break;
     }
@@ -954,7 +1133,7 @@ const TEMPLATE = `
     <button class="tool" data-act="toc">${icon('toc')}<span>目录</span></button>
     <button class="tool" data-act="type">${icon('type')}<span>排版</span></button>
     <button class="tool" data-act="night">${icon('moon')}<span>夜读</span></button>
-    <button class="tool desk-only" data-act="full">${icon('expand')}<span>全屏</span></button>
+    <button class="tool" data-act="more">${icon('more')}<span>更多</span></button>
   </nav>
 </footer>
 <div class="scrim" data-ref="scrim"></div>
@@ -968,6 +1147,11 @@ const TEMPLATE = `
   <div class="grab"></div>
   <div class="sheet-head"><div><b>阅读设置</b></div><button class="ib sm" data-ref="typeClose" aria-label="关闭">${icon('close')}</button></div>
   <div class="sheet-body type-body" data-ref="typeBody"></div>
+</section>
+<section class="sheet float" data-ref="moreSheet" aria-label="更多">
+  <div class="grab"></div>
+  <div class="sheet-head"><div><b>更多</b><span data-ref="moreSub"></span></div><button class="ib sm" data-ref="moreClose" aria-label="关闭">${icon('close')}</button></div>
+  <div class="sheet-body more-body" data-ref="moreBody"></div>
 </section>
 <section class="sheet right" data-ref="searchSheet" aria-label="书内搜索">
   <div class="grab"></div>
